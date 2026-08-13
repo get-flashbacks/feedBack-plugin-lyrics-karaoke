@@ -1274,7 +1274,7 @@
             const artist = escHtml(s.artist);
             // Stash the raw values on data attributes so the click
             // handler can read them without the brittle inline-string
-            // escape dance the old lyrics_sync plugin used.
+            // escape dance the earlier lyrics_sync implementation used.
             return (
                 '<div class="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-dark-700/50 transition cursor-pointer" ' +
                 'data-fn="' + fn + '" data-title="' + title + '" data-artist="' + artist + '" ' +

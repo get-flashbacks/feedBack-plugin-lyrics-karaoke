@@ -56,8 +56,8 @@ _job_locks_guard = threading.Lock()
 def _get_demucs_server_url() -> str | None:
     """Read the configured alignment server URL from the shared config.json.
 
-    The Stems / Lyrics Sync settings page persists this; the merged plugin
-    keeps the same key so existing setups keep working without migration.
+    The Stems / Lyrics Sync settings page persists this; this plugin keeps
+    the same key so existing setups keep working without migration.
     """
     if _config_dir is None:
         return None
