@@ -1,7 +1,8 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.4.4",
+  "version": "1.4.5",
+  "standards": ["plugin-runtime-idempotent.v1"],
   "private": false,
   "nav": {
     "label": "Lyrics Karaoke",

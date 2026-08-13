@@ -1726,9 +1726,22 @@
         }
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
+    // The Host may re-execute screen.js on plugin reload, which re-runs this
+    // IIFE and would call init() a second time — adding a second
+    // 'song:loaded' subscription (so onSongLoaded fires twice per song) and
+    // wrapping window.showScreen around the already-wrapped version. Guard
+    // the whole bootstrap: on a second evaluation the first run's hooks are
+    // still bound to live closures, so leaving them in place is correct.
+    // The flag lives on window because it has to outlive the re-execution
+    // that resets module state. Same shape as section_map's
+    // __slopsmithSectionMapHooksInstalled guard.
+    const HOOK_KEY = '__feedBackLyricsKaraokeHooksInstalled';
+    if (!window[HOOK_KEY]) {
+        window[HOOK_KEY] = true;
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
     }
 })();

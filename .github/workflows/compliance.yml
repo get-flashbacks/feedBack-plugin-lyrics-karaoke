@@ -1,0 +1,160 @@
+name: compliance
+
+# A targeted subset of the plugin-spec checks that the org's original-repo
+# plugins run via their own custom-checks.yml. This repo's ci.yml calls the
+# shared reusable-ci.yml, which runs the test suites and nothing else — so
+# before this file, fork-derived plugins got tests but no spec enforcement
+# while the originals got enforcement but (in one case) no tests.
+#
+# Deliberately not the full 16-job set. These three are the ones that map to
+# defects a cross-repo audit actually found in these repos: versions and
+# changelogs going stale while functional source shipped, and screen.js
+# re-executing on plugin reload without a guard. Jobs self-skip when they
+# don't apply (no CHANGELOG.md, no screen.js).
+#
+# The right long-term home for these is got-feedback/.github's
+# reusable-ci.yml, so every repo picks them up from one reference. Delete
+# this file when that lands.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_DIR: "."
+
+jobs:
+  version-bumped-on-change:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: plugin.json version must bump when functional source changes
+        run: |
+          set -eu
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE" ]; then
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "No usable base commit to diff against — skipping"
+            exit 0
+          fi
+          # Diff against the MERGE BASE, not the base tip. On pull_request,
+          # github.event.pull_request.base.sha is main's live tip, so a
+          # two-dot diff also reports commits that landed on main after this
+          # branch forked — failing the PR for a bump it does not owe.
+          BASE=$(git merge-base "$BASE" HEAD || echo "$BASE")
+          DIR="$PLUGIN_DIR"
+          CHANGED=$(git diff --name-only "$BASE" HEAD -- "$DIR" || true)
+          FUNCTIONAL=$(echo "$CHANGED" | grep -E '\.(py|js|html|css)$' | grep -vE '(^|/)tests?/' | grep -v 'plugin\.json$' || true)
+          if [ -z "$FUNCTIONAL" ]; then
+            echo "No functional source changed — skipping"
+            exit 0
+          fi
+          MANIFEST_CHANGED=$(git diff --name-only "$BASE" HEAD -- "$DIR/plugin.json" || true)
+          if [ -z "$MANIFEST_CHANGED" ]; then
+            echo "::error file=$DIR/plugin.json::functional source changed ($FUNCTIONAL) but plugin.json was not — bump the version"
+            exit 1
+          fi
+          OLD_VERSION=$(git show "$BASE:$DIR/plugin.json" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('version',''))" || echo "")
+          NEW_VERSION=$(python3 -c "import json; print(json.load(open('$DIR/plugin.json')).get('version',''))")
+          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+            echo "::error file=$DIR/plugin.json::plugin.json changed but version is still $NEW_VERSION — bump it"
+            exit 1
+          fi
+          echo "OK: version bumped $OLD_VERSION -> $NEW_VERSION"
+
+  idempotent-top-level-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Top-level listeners/timers must be inside a reload guard
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          plugin_dir = os.environ["PLUGIN_DIR"]
+          js_path = os.path.join(plugin_dir, "screen.js")
+          if not os.path.isfile(js_path):
+              print("No screen.js — skipping")
+              raise SystemExit(0)
+
+          src = open(js_path, encoding="utf-8").read()
+          has_hotpath = bool(re.search(r'(window\.addEventListener|document\.addEventListener|setInterval)\s*\(', src))
+          # Guard naming varies across the org (__xInstalled, __xHooksInstalled,
+          # __feedBackDynamicDifficulty, __ddCardBadgeRegistered, ...) — no
+          # single suffix covers them, so just require *some* window-level __
+          # flag rather than pattern-matching a specific naming style.
+          #
+          # Both access forms count. section_map, the org's reference guard,
+          # hoists the name into a const and uses window[HOOK_KEY]; matching
+          # only the dotted form flags it as unguarded when it is not.
+          dotted = re.search(r'window\.__\w+', src)
+          bracket_literal = re.search(r'window\s*\[\s*[\'"]__\w+[\'"]\s*\]', src)
+          bracket_const = (
+              re.search(r'window\s*\[\s*[A-Za-z_$][\w$]*\s*\]', src)
+              and re.search(r'[\'"]__\w+[\'"]', src)
+          )
+          has_guard = bool(dotted or bracket_literal or bracket_const)
+
+          # Known limitation: this proves a guard EXISTS somewhere in the
+          # file, not that every hotpath sits inside one. A new unguarded
+          # listener added alongside an existing guard still passes. It is a
+          # cross-repo floor, not proof of idempotency.
+          if has_hotpath and not has_guard:
+              print(f"::error file={js_path}::found addEventListener/setInterval but no window.__*Installed-style reload guard — screen.js can re-execute on plugin reload")
+              sys.exit(1)
+          print("OK: no unguarded top-level listeners detected (or none present)")
+          PY
+
+  changelog-updated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: CHANGELOG.md Unreleased section must be updated for functional changes
+        run: |
+          set -eu
+          if [ ! -f CHANGELOG.md ]; then
+            echo "No CHANGELOG.md in this repo — skipping"
+            exit 0
+          fi
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE" ]; then
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "No usable base commit to diff against — skipping"
+            exit 0
+          fi
+          # Diff against the MERGE BASE, not the base tip. On pull_request,
+          # github.event.pull_request.base.sha is main's live tip, so a
+          # two-dot diff also reports commits that landed on main after this
+          # branch forked — failing the PR for a bump it does not owe.
+          BASE=$(git merge-base "$BASE" HEAD || echo "$BASE")
+          FUNCTIONAL=$(git diff --name-only "$BASE" HEAD -- "$PLUGIN_DIR" | grep -E '\.(py|js|html|css)$' | grep -vE '(^|/)tests?/' || true)
+          if [ -z "$FUNCTIONAL" ]; then
+            echo "No functional source changed — skipping"
+            exit 0
+          fi
+          # Touching the file is not enough — editing an already-released
+          # section while [Unreleased] stays put is the exact slip this is
+          # meant to catch. Compare the [Unreleased] section itself.
+          unreleased() {
+            git show "$1:CHANGELOG.md" 2>/dev/null \
+              | awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f'
+          }
+          if [ "$(unreleased "$BASE")" = "$(unreleased HEAD)" ]; then
+            echo "::error file=CHANGELOG.md::functional source changed but CHANGELOG.md's [Unreleased] section did not (a release cut that empties it also counts as a change)"
+            exit 1
+          fi
+          echo "OK: CHANGELOG.md [Unreleased] changed"
+
