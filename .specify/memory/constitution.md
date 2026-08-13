@@ -2,8 +2,10 @@
 
 This plugin turns a sloppak song into a karaoke target: per-syllable
 alignment + per-syllable pitch, rendered as a falling-bar ribbon over
-the highway. It superseded the standalone `lyrics_sync` plugin and
-absorbed its alignment endpoints.
+the highway. It duplicates the alignment/save flow the standalone
+`lyrics_sync` plugin also has, adding pitch extraction and the karaoke
+overlay on top — `lyrics_sync` is separately maintained, not superseded
+or absorbed (see `screen.js`'s header comment).
 
 ## Principles
 
