@@ -15,10 +15,13 @@
  *     positioned by MIDI pitch, with syllable text below and a sweeping
  *     playhead) on a fixed-position canvas above the highway.
  *
- * The merge consumes the previous standalone "Lyrics Sync" plugin —
- * its alignment + save endpoints now live on this plugin. The old
- * lyrics_sync directory remains as a redirect stub for users with
- * bookmarks pointing at it.
+ * This plugin duplicates the alignment + save flow the standalone
+ * "Lyrics Sync" plugin (`lyrics_sync`) also has, adding pitch extraction
+ * and the karaoke overlay on top. `lyrics_sync` is NOT a stub — it is a
+ * separately-maintained plugin that also gained a manual tap-to-time /
+ * waveform-editing surface Lyrics Karaoke doesn't have. Consolidating the
+ * duplicated alignment/save code between the two is an open follow-up,
+ * not something either plugin has done.
  */
 (function () {
     'use strict';
