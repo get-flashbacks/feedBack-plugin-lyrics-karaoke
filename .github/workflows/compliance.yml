@@ -46,9 +46,14 @@ jobs:
             echo "No usable base commit to diff against — skipping"
             exit 0
           fi
+          # Diff against the MERGE BASE, not the base tip. On pull_request,
+          # github.event.pull_request.base.sha is main's live tip, so a
+          # two-dot diff also reports commits that landed on main after this
+          # branch forked — failing the PR for a bump it does not owe.
+          BASE=$(git merge-base "$BASE" HEAD || echo "$BASE")
           DIR="$PLUGIN_DIR"
           CHANGED=$(git diff --name-only "$BASE" HEAD -- "$DIR" || true)
-          FUNCTIONAL=$(echo "$CHANGED" | grep -E '\.(py|js|html)$' | grep -vE '(^|/)tests?/' | grep -v 'plugin\.json$' || true)
+          FUNCTIONAL=$(echo "$CHANGED" | grep -E '\.(py|js|html|css)$' | grep -vE '(^|/)tests?/' | grep -v 'plugin\.json$' || true)
           if [ -z "$FUNCTIONAL" ]; then
             echo "No functional source changed — skipping"
             exit 0
@@ -99,6 +104,10 @@ jobs:
           )
           has_guard = bool(dotted or bracket_literal or bracket_const)
 
+          # Known limitation: this proves a guard EXISTS somewhere in the
+          # file, not that every hotpath sits inside one. A new unguarded
+          # listener added alongside an existing guard still passes. It is a
+          # cross-repo floor, not proof of idempotency.
           if has_hotpath and not has_guard:
               print(f"::error file={js_path}::found addEventListener/setInterval but no window.__*Installed-style reload guard — screen.js can re-execute on plugin reload")
               sys.exit(1)
@@ -126,15 +135,26 @@ jobs:
             echo "No usable base commit to diff against — skipping"
             exit 0
           fi
-          FUNCTIONAL=$(git diff --name-only "$BASE" HEAD -- "$PLUGIN_DIR" | grep -E '\.(py|js|html)$' | grep -vE '(^|/)tests?/' || true)
+          # Diff against the MERGE BASE, not the base tip. On pull_request,
+          # github.event.pull_request.base.sha is main's live tip, so a
+          # two-dot diff also reports commits that landed on main after this
+          # branch forked — failing the PR for a bump it does not owe.
+          BASE=$(git merge-base "$BASE" HEAD || echo "$BASE")
+          FUNCTIONAL=$(git diff --name-only "$BASE" HEAD -- "$PLUGIN_DIR" | grep -E '\.(py|js|html|css)$' | grep -vE '(^|/)tests?/' || true)
           if [ -z "$FUNCTIONAL" ]; then
             echo "No functional source changed — skipping"
             exit 0
           fi
-          CHANGELOG_DIFF=$(git diff --name-only "$BASE" HEAD -- CHANGELOG.md || true)
-          if [ -z "$CHANGELOG_DIFF" ]; then
-            echo "::error file=CHANGELOG.md::functional source changed but CHANGELOG.md was not updated"
+          # Touching the file is not enough — editing an already-released
+          # section while [Unreleased] stays put is the exact slip this is
+          # meant to catch. Compare the [Unreleased] section itself.
+          unreleased() {
+            git show "$1:CHANGELOG.md" 2>/dev/null \
+              | awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f'
+          }
+          if [ "$(unreleased "$BASE")" = "$(unreleased HEAD)" ]; then
+            echo "::error file=CHANGELOG.md::functional source changed but CHANGELOG.md's [Unreleased] section did not (a release cut that empties it also counts as a change)"
             exit 1
           fi
-          echo "OK: CHANGELOG.md was updated"
+          echo "OK: CHANGELOG.md [Unreleased] changed"
 
