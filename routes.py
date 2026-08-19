@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -895,7 +896,14 @@ def setup(app: FastAPI, context: dict):
         # Quote-escape for the legacy `filename=` fallback, and provide an
         # RFC 5987 `filename*=` form so non-ASCII / quote characters in
         # title-artist can't corrupt or break out of the header value.
-        ascii_name = safe_name.replace("\\", "\\\\").replace('"', '\\"')
+        # The `\` escape is a no-op today (safe_name already stripped `\`
+        # above) but guards this line if that stripping ever changes.
+        # Starlette encodes headers as Latin-1, so non-Latin-1 / control
+        # characters in the legacy fallback would raise UnicodeEncodeError —
+        # fold anything outside printable ASCII to `_` there; filename*
+        # carries the real UTF-8 name via percent-encoding regardless.
+        ascii_safe_name = re.sub(r"[^\x20-\x7e]", "_", safe_name)
+        ascii_name = ascii_safe_name.replace("\\", "\\\\").replace('"', '\\"')
         encoded_name = quote(f"{safe_name}.lrc", safe="")
 
         return Response(
