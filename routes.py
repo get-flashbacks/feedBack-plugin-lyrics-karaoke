@@ -30,11 +30,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import quote
 
 import yaml
 from fastapi import FastAPI
@@ -891,10 +893,26 @@ def setup(app: FastAPI, context: dict):
         safe_name = f"{artist} - {title}".strip(" -") or "lyrics"
         safe_name = safe_name.replace("/", "_").replace("\\", "_")
 
+        # Quote-escape for the legacy `filename=` fallback, and provide an
+        # RFC 5987 `filename*=` form so non-ASCII / quote characters in
+        # title-artist can't corrupt or break out of the header value.
+        # The `\` escape is a no-op today (safe_name already stripped `\`
+        # above) but guards this line if that stripping ever changes.
+        # Starlette encodes headers as Latin-1, so non-Latin-1 / control
+        # characters in the legacy fallback would raise UnicodeEncodeError —
+        # fold anything outside printable ASCII to `_` there; filename*
+        # carries the real UTF-8 name via percent-encoding regardless.
+        ascii_safe_name = re.sub(r"[^\x20-\x7e]", "_", safe_name)
+        ascii_name = ascii_safe_name.replace("\\", "\\\\").replace('"', '\\"')
+        encoded_name = quote(f"{safe_name}.lrc", safe="")
+
         return Response(
             content=lrc,
             media_type="text/plain",
             headers={
-                "Content-Disposition": f'attachment; filename="{safe_name}.lrc"',
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}.lrc"; '
+                    f"filename*=UTF-8''{encoded_name}"
+                ),
             },
         )

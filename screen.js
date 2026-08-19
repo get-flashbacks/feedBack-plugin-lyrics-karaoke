@@ -1627,8 +1627,19 @@
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         const disposition = res.headers.get('Content-Disposition') || '';
-        const match = disposition.match(/filename="(.+)"/);
-        a.download = match ? match[1] : 'lyrics.lrc';
+        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const legacyMatch = disposition.match(/filename="([^"]*(?:\\.[^"]*)*)"/i);
+        let downloadName = 'lyrics.lrc';
+        if (utf8Match) {
+            try {
+                downloadName = decodeURIComponent(utf8Match[1]);
+            } catch {
+                // Keep the default filename for a malformed header value.
+            }
+        } else if (legacyMatch) {
+            downloadName = legacyMatch[1].replace(/\\(["\\])/g, '$1');
+        }
+        a.download = downloadName;
         a.href = url;
         document.body.appendChild(a);
         a.click();
