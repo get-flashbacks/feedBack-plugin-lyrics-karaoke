@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -178,6 +179,8 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
             t = float(item.get("t", 0.0))
             d = float(item.get("d", 0.0))
         except (TypeError, ValueError):
+            continue
+        if not math.isfinite(t) or not math.isfinite(d):
             continue
         w = str(item.get("w", ""))
         if d <= 0:
@@ -520,6 +523,8 @@ def _persist_lyrics(
             end = float(seg["end"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not math.isfinite(start) or not math.isfinite(end):
+            continue
         d = end - start
         if d <= 0:
             continue
@@ -557,7 +562,6 @@ def _persist_pitch(
     if is_zip:
         _rezip_sloppak(source_dir, dlc_path)
 
-
 # ── LRC formatter (export only) ───────────────────────────────────────────────
 
 def _lrc_timestamp(t: float) -> str:
@@ -570,7 +574,10 @@ def _lrc_timestamp(t: float) -> str:
     rather than "[02:00.00]". Round to whole centiseconds FIRST, then split
     into minutes/seconds, so the carry happens before formatting.
     """
-    total_centis = round(max(0.0, float(t)) * 100)
+    seconds = float(t)
+    if not math.isfinite(seconds):
+        raise ValueError("LRC timestamp must be finite")
+    total_centis = round(max(0.0, seconds) * 100)
     minutes, centis = divmod(total_centis, 6000)
     return f"{minutes:02d}:{centis / 100:05.2f}"
 
@@ -584,6 +591,8 @@ def _format_lrc(segments: list[dict]) -> str:
         try:
             t = float(seg["start"])
         except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(t):
             continue
         lines.append(f"[{_lrc_timestamp(t)}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
