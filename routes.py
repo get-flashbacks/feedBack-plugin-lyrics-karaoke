@@ -878,7 +878,14 @@ def setup(app: FastAPI, context: dict):
                         "extractor": "server-crepe" if used_server else "local-pyin",
                     }
 
-            ok, payload = await asyncio.get_event_loop().run_in_executor(None, _worker)
+            # get_running_loop(), not get_event_loop(): this coroutine only
+            # ever runs inside a live event loop (it's an async route
+            # handler), so there's no "create one if none exists" case to
+            # fall back on — get_event_loop()'s deprecated implicit-loop
+            # behavior for a no-running-loop caller doesn't apply here, but
+            # get_running_loop() is still the more correct, self-documenting
+            # call for "the loop I'm already running in".
+            ok, payload = await asyncio.get_running_loop().run_in_executor(None, _worker)
             if not ok:
                 return JSONResponse(payload, 500)
             return payload
