@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -46,6 +47,12 @@ from fastapi.responses import JSONResponse, Response
 _config_dir: Path | None = None
 _get_dlc_dir = None
 SLOPPAK_CACHE_DIR: Path | None = None
+# Set from context["log"] in setup() — a stdlib logging.Logger namespaced to
+# feedBack.plugin.lyrics_karaoke, pre-configured with the app-wide level,
+# format, and correlation IDs. Defaults to the plain stdlib logger of the
+# same name so call sites never need a None-check, even though nothing
+# actually logs before setup() runs today.
+_log: logging.Logger = logging.getLogger("feedBack.plugin.lyrics_karaoke")
 
 # Coarse per-filename lock so two simultaneous "Generate" presses on the
 # same song serialize instead of racing on the same files.
@@ -553,6 +560,21 @@ def _persist_pitch(
 
 # ── LRC formatter (export only) ───────────────────────────────────────────────
 
+def _lrc_timestamp(t: float) -> str:
+    """Format a time in seconds as an LRC "mm:ss.xx" timestamp.
+
+    Computing minutes/seconds independently with `int(t // 60)` /
+    `f"{t % 60:05.2f}"` looks right but isn't: `:05.2f` rounds its operand,
+    so a seconds remainder like 59.996 prints as "60.00" instead of rolling
+    into the next minute — e.g. t=119.999 produced the invalid "[01:60.00]"
+    rather than "[02:00.00]". Round to whole centiseconds FIRST, then split
+    into minutes/seconds, so the carry happens before formatting.
+    """
+    total_centis = round(max(0.0, float(t)) * 100)
+    minutes, centis = divmod(total_centis, 6000)
+    return f"{minutes:02d}:{centis / 100:05.2f}"
+
+
 def _format_lrc(segments: list[dict]) -> str:
     """Convert alignment segments to the standard LRC line format."""
     lines = []
@@ -563,19 +585,18 @@ def _format_lrc(segments: list[dict]) -> str:
             t = float(seg["start"])
         except (KeyError, TypeError, ValueError):
             continue
-        minutes = int(t // 60)
-        seconds = t % 60
-        lines.append(f"[{minutes:02d}:{seconds:05.2f}]{seg.get('text', '')}")
+        lines.append(f"[{_lrc_timestamp(t)}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
 
 
 # ── HTTP routes ───────────────────────────────────────────────────────────────
 
 def setup(app: FastAPI, context: dict):
-    global _config_dir, _get_dlc_dir, SLOPPAK_CACHE_DIR
+    global _config_dir, _get_dlc_dir, SLOPPAK_CACHE_DIR, _log
 
     _config_dir = context["config_dir"]
     _get_dlc_dir = context["get_dlc_dir"]
+    _log = context.get("log") or _log
     get_cache = context.get("get_sloppak_cache_dir", lambda: None)
     SLOPPAK_CACHE_DIR = get_cache()
     if SLOPPAK_CACHE_DIR is None:
@@ -831,9 +852,9 @@ def setup(app: FastAPI, context: dict):
                             notes = _extract_pitch_via_server(server_url, tmp_vocals, lyrics)
                             used_server = True
                         except NotImplementedError:
-                            print("[lyrics_karaoke] /pitch not available on demucs server, using local pYIN")
+                            _log.info("/pitch not available on demucs server, using local pYIN")
                         except Exception as exc:  # noqa: BLE001
-                            print(f"[lyrics_karaoke] demucs /pitch failed ({exc}); falling back to local pYIN")
+                            _log.warning("demucs /pitch failed (%s); falling back to local pYIN", exc)
                     if notes is None:
                         try:
                             notes = _extract_pitch_per_syllable(tmp_vocals, lyrics)
