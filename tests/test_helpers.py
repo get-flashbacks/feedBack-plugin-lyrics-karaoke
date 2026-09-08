@@ -223,6 +223,9 @@ def test_setup_wires_context_log_into_module_global():
     from fastapi import FastAPI
 
     original_log = routes._log
+    original_config_dir = routes._config_dir
+    original_get_dlc_dir = routes._get_dlc_dir
+    original_cache = routes.SLOPPAK_CACHE_DIR
     try:
         fake_log = logging.getLogger("test.lyrics_karaoke.fake")
         app = FastAPI()
@@ -234,3 +237,6 @@ def test_setup_wires_context_log_into_module_global():
         assert routes._log is fake_log
     finally:
         routes._log = original_log
+        routes._config_dir = original_config_dir
+        routes._get_dlc_dir = original_get_dlc_dir
+        routes.SLOPPAK_CACHE_DIR = original_cache
