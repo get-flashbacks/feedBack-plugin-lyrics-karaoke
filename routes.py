@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import math
 import os
 import re
 import shutil
@@ -46,6 +48,12 @@ from fastapi.responses import JSONResponse, Response
 _config_dir: Path | None = None
 _get_dlc_dir = None
 SLOPPAK_CACHE_DIR: Path | None = None
+# Set from context["log"] in setup() — a stdlib logging.Logger namespaced to
+# feedBack.plugin.lyrics_karaoke, pre-configured with the app-wide level,
+# format, and correlation IDs. Defaults to the plain stdlib logger of the
+# same name so call sites never need a None-check, even though nothing
+# actually logs before setup() runs today.
+_log: logging.Logger = logging.getLogger("feedBack.plugin.lyrics_karaoke")
 
 # Coarse per-filename lock so two simultaneous "Generate" presses on the
 # same song serialize instead of racing on the same files.
@@ -171,6 +179,8 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
             t = float(item.get("t", 0.0))
             d = float(item.get("d", 0.0))
         except (TypeError, ValueError):
+            continue
+        if not math.isfinite(t) or not math.isfinite(d):
             continue
         w = str(item.get("w", ""))
         if d <= 0:
@@ -513,6 +523,8 @@ def _persist_lyrics(
             end = float(seg["end"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not math.isfinite(start) or not math.isfinite(end):
+            continue
         d = end - start
         if d <= 0:
             continue
@@ -550,8 +562,32 @@ def _persist_pitch(
     if is_zip:
         _rezip_sloppak(source_dir, dlc_path)
 
-
 # ── LRC formatter (export only) ───────────────────────────────────────────────
+
+def _lrc_timestamp(t: float) -> str:
+    """Format a time in seconds as an LRC "mm:ss.xx" timestamp.
+
+    Computing minutes/seconds independently with `int(t // 60)` /
+    `f"{t % 60:05.2f}"` looks right but isn't: `:05.2f` rounds its operand,
+    so a seconds remainder like 59.996 prints as "60.00" instead of rolling
+    into the next minute — e.g. t=119.999 produced the invalid "[01:60.00]"
+    rather than "[02:00.00]". Round to whole centiseconds FIRST, then split
+    into minutes/seconds, so the carry happens before formatting.
+    """
+    seconds = float(t)
+    if not math.isfinite(seconds):
+        raise ValueError("LRC timestamp must be finite")
+    # A value can pass isfinite() above yet still overflow to inf once
+    # scaled to centiseconds (e.g. 1e307 * 100 exceeds the max double),
+    # which round() below would turn into the same unhelpful
+    # OverflowError this function exists to guard against.
+    scaled = max(0.0, seconds) * 100
+    if not math.isfinite(scaled):
+        raise ValueError("LRC timestamp must be finite")
+    total_centis = round(scaled)
+    minutes, centis = divmod(total_centis, 6000)
+    return f"{minutes:02d}:{centis / 100:05.2f}"
+
 
 def _format_lrc(segments: list[dict]) -> str:
     """Convert alignment segments to the standard LRC line format."""
@@ -563,19 +599,24 @@ def _format_lrc(segments: list[dict]) -> str:
             t = float(seg["start"])
         except (KeyError, TypeError, ValueError):
             continue
-        minutes = int(t // 60)
-        seconds = t % 60
-        lines.append(f"[{minutes:02d}:{seconds:05.2f}]{seg.get('text', '')}")
+        if not math.isfinite(t):
+            continue
+        try:
+            timestamp = _lrc_timestamp(t)
+        except ValueError:
+            continue
+        lines.append(f"[{timestamp}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
 
 
 # ── HTTP routes ───────────────────────────────────────────────────────────────
 
 def setup(app: FastAPI, context: dict):
-    global _config_dir, _get_dlc_dir, SLOPPAK_CACHE_DIR
+    global _config_dir, _get_dlc_dir, SLOPPAK_CACHE_DIR, _log
 
     _config_dir = context["config_dir"]
     _get_dlc_dir = context["get_dlc_dir"]
+    _log = context.get("log") or _log
     get_cache = context.get("get_sloppak_cache_dir", lambda: None)
     SLOPPAK_CACHE_DIR = get_cache()
     if SLOPPAK_CACHE_DIR is None:
@@ -831,9 +872,9 @@ def setup(app: FastAPI, context: dict):
                             notes = _extract_pitch_via_server(server_url, tmp_vocals, lyrics)
                             used_server = True
                         except NotImplementedError:
-                            print("[lyrics_karaoke] /pitch not available on demucs server, using local pYIN")
+                            _log.info("/pitch not available on demucs server, using local pYIN")
                         except Exception as exc:  # noqa: BLE001
-                            print(f"[lyrics_karaoke] demucs /pitch failed ({exc}); falling back to local pYIN")
+                            _log.warning("demucs /pitch failed (%s); falling back to local pYIN", exc)
                     if notes is None:
                         try:
                             notes = _extract_pitch_per_syllable(tmp_vocals, lyrics)
@@ -857,7 +898,14 @@ def setup(app: FastAPI, context: dict):
                         "extractor": "server-crepe" if used_server else "local-pyin",
                     }
 
-            ok, payload = await asyncio.get_event_loop().run_in_executor(None, _worker)
+            # get_running_loop(), not get_event_loop(): this coroutine only
+            # ever runs inside a live event loop (it's an async route
+            # handler), so there's no "create one if none exists" case to
+            # fall back on — get_event_loop()'s deprecated implicit-loop
+            # behavior for a no-running-loop caller doesn't apply here, but
+            # get_running_loop() is still the more correct, self-documenting
+            # call for "the loop I'm already running in".
+            ok, payload = await asyncio.get_running_loop().run_in_executor(None, _worker)
             if not ok:
                 return JSONResponse(payload, 500)
             return payload

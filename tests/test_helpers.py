@@ -181,6 +181,17 @@ def test_format_lrc_basic_timestamps():
     assert lrc == "[00:00.00]Hello\n[01:05.50]World\n"
 
 
+def test_lrc_timestamp_rolls_seconds_into_next_minute_on_rounding():
+    # int(t // 60) + f"{t % 60:05.2f}" independently truncates the minute and
+    # rounds the seconds, so a value like 119.999 used to print the invalid
+    # "01:60.00" instead of rolling over to "02:00.00". Round to whole
+    # centiseconds first, then split, so the carry happens before formatting.
+    assert routes._lrc_timestamp(119.999) == "02:00.00"
+    assert routes._lrc_timestamp(59.996) == "01:00.00"
+    assert routes._lrc_timestamp(65.0) == "01:05.00"
+    assert routes._lrc_timestamp(0.0) == "00:00.00"
+
+
 def test_format_lrc_skips_malformed_segments():
     segments = [{"text": "no start"}, "not a dict", {"start": 1.0}]
     lrc = routes._format_lrc(segments)
@@ -189,3 +200,43 @@ def test_format_lrc_skips_malformed_segments():
 
 def test_format_lrc_empty_segments_yields_trailing_newline_only():
     assert routes._format_lrc([]) == "\n"
+
+
+# ── logging (context["log"] contract) ──────────────────────────────────────
+
+def test_module_has_no_print_calls():
+    # Plugin-contract rule: backend output goes through context["log"], never
+    # print() — it bypasses correlation IDs and log rotation. Source-level
+    # guard so a future print() creeps back in without a reviewer catching it.
+    import ast
+    tree = ast.parse(Path(routes.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert "print" not in calls
+
+
+def test_setup_wires_context_log_into_module_global():
+    import logging
+    from fastapi import FastAPI
+
+    original_log = routes._log
+    original_config_dir = routes._config_dir
+    original_get_dlc_dir = routes._get_dlc_dir
+    original_cache = routes.SLOPPAK_CACHE_DIR
+    try:
+        fake_log = logging.getLogger("test.lyrics_karaoke.fake")
+        app = FastAPI()
+        routes.setup(app, {
+            "config_dir": Path("/tmp/does-not-need-to-exist"),
+            "get_dlc_dir": lambda: None,
+            "log": fake_log,
+        })
+        assert routes._log is fake_log
+    finally:
+        routes._log = original_log
+        routes._config_dir = original_config_dir
+        routes._get_dlc_dir = original_get_dlc_dir
+        routes.SLOPPAK_CACHE_DIR = original_cache
