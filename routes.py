@@ -601,7 +601,11 @@ def _format_lrc(segments: list[dict]) -> str:
             continue
         if not math.isfinite(t):
             continue
-        lines.append(f"[{_lrc_timestamp(t)}]{seg.get('text', '')}")
+        try:
+            timestamp = _lrc_timestamp(t)
+        except ValueError:
+            continue
+        lines.append(f"[{timestamp}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
 
 

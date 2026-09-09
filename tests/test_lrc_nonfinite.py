@@ -20,6 +20,18 @@ def test_lrc_timestamp_rejects_a_finite_value_that_overflows_when_scaled():
         routes._lrc_timestamp(1e307)
 
 
+def test_format_lrc_skips_a_finite_value_that_overflows_when_scaled():
+    # _format_lrc's own guard only checks math.isfinite(t), which 1e307
+    # passes -- it must also catch the ValueError _lrc_timestamp raises
+    # for the scaled-overflow case, or /export still 500s on this input
+    # (just with a different exception type than before).
+    segments = [
+        {"start": 1.0, "text": "kept"},
+        {"start": 1e307, "text": "overflows-when-scaled dropped"},
+    ]
+    assert routes._format_lrc(segments) == "[00:01.00]kept\n"
+
+
 def test_format_lrc_skips_non_finite_segments():
     segments = [
         {"start": "Infinity", "text": "bad-inf"},
