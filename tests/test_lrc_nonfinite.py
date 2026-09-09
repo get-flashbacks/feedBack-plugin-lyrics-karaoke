@@ -11,6 +11,15 @@ def test_lrc_timestamp_rejects_non_finite_values(value):
         routes._lrc_timestamp(value)
 
 
+def test_lrc_timestamp_rejects_a_finite_value_that_overflows_when_scaled():
+    # 1e307 passes math.isfinite() (it's a real, finite double), but
+    # 1e307 * 100 = 1e309 exceeds the max representable double and becomes
+    # inf -- round(inf) then raises OverflowError, the exact unhelpful
+    # error this function exists to turn into a clean ValueError.
+    with pytest.raises(ValueError, match="finite"):
+        routes._lrc_timestamp(1e307)
+
+
 def test_format_lrc_skips_non_finite_segments():
     segments = [
         {"start": "Infinity", "text": "bad-inf"},

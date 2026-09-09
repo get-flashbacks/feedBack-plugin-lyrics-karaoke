@@ -577,7 +577,14 @@ def _lrc_timestamp(t: float) -> str:
     seconds = float(t)
     if not math.isfinite(seconds):
         raise ValueError("LRC timestamp must be finite")
-    total_centis = round(max(0.0, seconds) * 100)
+    # A value can pass isfinite() above yet still overflow to inf once
+    # scaled to centiseconds (e.g. 1e307 * 100 exceeds the max double),
+    # which round() below would turn into the same unhelpful
+    # OverflowError this function exists to guard against.
+    scaled = max(0.0, seconds) * 100
+    if not math.isfinite(scaled):
+        raise ValueError("LRC timestamp must be finite")
+    total_centis = round(scaled)
     minutes, centis = divmod(total_centis, 6000)
     return f"{minutes:02d}:{centis / 100:05.2f}"
 
