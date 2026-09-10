@@ -125,12 +125,16 @@ re-deriving it):
 
 ### Multi-voice (duet) — deferred to a spec change, not silently adopted
 
-feedpak-spec v1.14 (`spec/feedpak-v1.md` §5.5, §7.1–7.3) has **no**
-multi-singer key today. `lyric_tracks[]` exists but models language
-variants of one performance (original/transliteration/translation) and the
-spec explicitly states "Per-track vocal pitch is out of scope for this
-version." Karaoke Highway's `routes.py` already reads a non-spec manifest
-extension to support duets:
+feedpak-spec (`spec/feedpak-v1.md` §5.5 `lyric_tracks[]`, §7.1 `lyrics.json`,
+§7.2 `vocal_pitch.json` — the token contract above lives in §7.1/§7.2, not
+§7.3, which is the separate `vocal_pitch_contour.json` shape) has **no**
+multi-singer key as of the current spec version (1.19.0, checked at the
+time of writing — re-verify against whatever tag is current when reading
+this). `lyric_tracks[]` exists but models language variants of one
+performance (original/transliteration/translation) and the spec explicitly
+states "Per-track vocal pitch is out of scope for this version" — still
+true as of 1.19.0. Karaoke Highway's `routes.py` already reads a non-spec
+manifest extension to support duets:
 
 ```yaml
 vocal_tracks:
@@ -201,11 +205,17 @@ behavior for pitch-less songs.
   fallback everywhere else.
 - **Settings namespace:** `lyrics_karaoke.*` (not Karaoke Highway's
   `vocals_highway.*`) — keeps the existing plugin id's `localStorage`
-  convention. Compatible legacy keys (tolerance, octave-independent
-  matching, mic timing offset) migrate once on first load under the new
-  provider; keys with no legacy equivalent get the safe defaults Karaoke
-  Highway ships (`tolerance: 1` semitone, `octaveIndependent: false`,
-  `micOffsetMs: 0`).
+  convention. **The legacy overlay's actual persisted surface is much
+  smaller than Karaoke Highway's:** `screen.js` persists exactly one key,
+  `lyrics_karaoke.micFeedback` (an on/off boolean), and hard-codes
+  `_LK_MATCH_TOLERANCE = 1.0` as a constant — there is no
+  octave-independent-matching or mic-timing-offset setting anywhere in the
+  overlay to migrate. So on first load under the new provider, only
+  `micFeedback` carries forward; `tolerance`, `octaveIndependent`, and
+  `micOffsetMs` all fall into "no legacy equivalent" and take Karaoke
+  Highway's safe defaults (`tolerance: 1` semitone, `octaveIndependent:
+  false`, `micOffsetMs: 0`) fresh. #11 should not scope a migration path
+  for settings the overlay never had.
 - Device/channel selection, tolerance, octave-free matching, and mic timing
   offset are exposed as visualization `settings` (feedBack#849) so
   splitscreen's per-panel popover renders them without host-side
