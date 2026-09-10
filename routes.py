@@ -19,6 +19,7 @@ Endpoints
 * ``GET  /status?filename=…``     — per-song readiness flags
 * ``GET  /server-status``         — alignment server reachable?
 * ``GET  /data?filename=…``       — merged ``[{t, d, w, midi?}]`` for the player overlay
+* ``GET  /playback?filename=…``   — canonical versioned multi-voice payload (see below)
 * ``POST /align``                 — run Whisper alignment, return segments
 * ``POST /save-lyrics``           — persist alignment segments as ``lyrics.json``
 * ``POST /generate-pitch``        — extract per-syllable pitch and persist ``vocal_pitch.json``
@@ -187,6 +188,135 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
             continue
         out.append({"t": t, "d": d, "w": w})
     return out
+
+
+# ── Canonical multi-voice playback payload ────────────────────────────────────
+#
+# One versioned shape for the player renderer to consume, covering today's
+# single-singer sloppaks, lyrics-only sloppaks (no vocal_pitch.json), and —
+# once a `vocal_parts`-shaped manifest key clears the feedpak-spec FEP
+# process (tracked in #10) — multi-voice/duet packs. Until that key exists,
+# every pack surfaces as a single ``primary`` voice built from the existing
+# ``lyrics``/``vocal_pitch`` manifest keys, so this endpoint stays fully
+# backward compatible with every sloppak `/data` already serves.
+#
+# Unlike `_lyrics_tokens`/`_read_pitch_file` (tolerant — used by `/status`
+# and the legacy `/data` overlay, which must keep degrading quietly), this
+# path distinguishes "no side file" (fine, quietly absent) from "side file
+# present but unparseable" (a real error, reported as 422 rather than
+# silently swallowed) so a corrupt pack doesn't masquerade as a lyrics-only
+# one.
+
+PLAYBACK_SCHEMA_VERSION = 1
+
+
+class PlaybackPayloadError(Exception):
+    """Raised for malformed pack content; carries the HTTP status to return."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _read_json_strict(path: Path | None, *, what: str) -> object | None:
+    """Read+parse ``path`` as JSON, or ``None`` if it doesn't exist.
+
+    Raises ``PlaybackPayloadError(422, ...)`` on unparseable content — the
+    file is present but not valid JSON, which is a broken pack, not an
+    absent one. Never includes the filesystem path in the error message
+    (packs may be shared/inspected; see `_safe_source_path`'s docstring).
+    """
+    if path is None or not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise PlaybackPayloadError(422, f"Malformed {what}") from exc
+
+
+def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
+    """Build sorted, sanitized ``[{start, duration, text, midi?}]`` tokens
+    for the primary voice from the ``lyrics``/``vocal_pitch`` manifest keys.
+
+    Per-token sanitization mirrors `_lyrics_tokens`: a token with a
+    non-finite or missing start time, or a non-finite/negative duration, is
+    dropped rather than failing the whole request — one bad token shouldn't
+    blank a whole song. Zero duration is kept (a beat/cue marker is valid).
+    A malformed *file* (present but not valid JSON, or not shaped as
+    expected) is a `PlaybackPayloadError`, not a silent drop.
+    """
+    lyrics_rel = manifest.get("lyrics")
+    lyrics_path = _safe_source_path(source_dir, str(lyrics_rel)) if lyrics_rel else None
+    raw_lyrics = _read_json_strict(lyrics_path, what="lyrics.json")
+    if raw_lyrics is not None and not isinstance(raw_lyrics, list):
+        raise PlaybackPayloadError(422, "Malformed lyrics.json")
+
+    pitch_rel = manifest.get("vocal_pitch")
+    pitch_path = _safe_source_path(source_dir, str(pitch_rel)) if pitch_rel else None
+    raw_pitch = _read_json_strict(pitch_path, what="vocal_pitch.json")
+    if raw_pitch is not None and (
+        not isinstance(raw_pitch, dict) or not isinstance(raw_pitch.get("notes"), list)
+    ):
+        raise PlaybackPayloadError(422, "Malformed vocal_pitch.json")
+
+    pitch_by_t: dict[str, int] = {}
+    for note in (raw_pitch or {}).get("notes", []) if raw_pitch else []:
+        if not isinstance(note, dict):
+            continue
+        try:
+            t = float(note["t"])
+            midi = int(note["midi"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(t):
+            continue
+        pitch_by_t[repr(t)] = midi
+
+    tokens: list[dict] = []
+    for item in raw_lyrics or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item.get("t", 0.0))
+            duration = float(item.get("d", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(duration) or duration < 0:
+            continue
+        token = {"start": start, "duration": duration, "text": str(item.get("w", ""))}
+        midi = pitch_by_t.get(repr(start))
+        if midi is not None:
+            token["midi"] = midi
+        tokens.append(token)
+
+    tokens.sort(key=lambda tok: tok["start"])
+    return tokens
+
+
+def _build_playback_payload(filename: str, source_dir: Path, manifest: dict) -> dict:
+    """Assemble the canonical playback payload for one resolved sloppak.
+
+    Raises ``PlaybackPayloadError`` for malformed pack content. Returns a
+    payload with an empty ``voices`` list when the pack has no usable
+    lyrics tokens at all — callers treat that as "not found" (404), not a
+    server error, since an unprepared song is a normal, expected state.
+    """
+    tokens = _canonical_voice_tokens(source_dir, manifest)
+    voices = []
+    if tokens:
+        voices.append({
+            "id": "primary",
+            "name": "Vocals",
+            "primary": True,
+            "tokens": tokens,
+        })
+    return {
+        "schema_version": PLAYBACK_SCHEMA_VERSION,
+        "song": {"filename": filename},
+        "arrangement": {"index": None},
+        "voices": voices,
+    }
 
 
 # ── Format / location helpers ─────────────────────────────────────────────────
@@ -712,6 +842,27 @@ def setup(app: FastAPI, context: dict):
                 entry["midi"] = mid
             merged.append(entry)
         return {"filename": filename, "tokens": merged}
+
+    @app.get("/api/plugins/lyrics_karaoke/playback")
+    def lk_playback(filename: str = ""):
+        """Canonical multi-voice playback payload (see module docstring).
+
+        Superset of ``/data`` shaped for the integrated visualization
+        provider: ``{schema_version, song, arrangement, voices: [{id,
+        name, primary, tokens: [{start, duration, text, midi?}]}]}``.
+        ``/data`` is unaffected and keeps serving its existing shape.
+        """
+        resolved = _resolve_sloppak(filename)
+        if resolved is None:
+            return JSONResponse({"error": "Not a sloppak"}, 404)
+        source_dir, manifest, _dlc_path, _is_zip = resolved
+        try:
+            payload = _build_playback_payload(filename, source_dir, manifest)
+        except PlaybackPayloadError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
+        if not payload["voices"]:
+            return JSONResponse({"error": "No lyrics data"}, 404)
+        return payload
 
     # ── Stage 1: align lyrics text with Whisper ───────────────────────────
 
