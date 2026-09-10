@@ -202,10 +202,12 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
 #
 # Unlike `_lyrics_tokens`/`_read_pitch_file` (tolerant — used by `/status`
 # and the legacy `/data` overlay, which must keep degrading quietly), this
-# path distinguishes "no side file" (fine, quietly absent) from "side file
-# present but unparseable" (a real error, reported as 422 rather than
-# silently swallowed) so a corrupt pack doesn't masquerade as a lyrics-only
-# one.
+# path distinguishes "no side file at all" — absent manifest key, or a
+# declared path that doesn't resolve to anything on disk; tolerated the
+# same as `/status`/`/data`, since lyrics-only is a valid response shape
+# here — from "side file present but unparseable" (a real error, reported
+# as 422 rather than silently swallowed) so a *corrupt* pack doesn't
+# masquerade as a merely unprepared/lyrics-only one.
 
 PLAYBACK_SCHEMA_VERSION = 1
 
