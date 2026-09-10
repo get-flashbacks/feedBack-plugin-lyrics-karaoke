@@ -260,8 +260,9 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     ):
         raise PlaybackPayloadError(422, "Malformed vocal_pitch.json")
 
+    pitch_notes = raw_pitch.get("notes", []) if raw_pitch else []
     pitch_by_t: dict[str, int] = {}
-    for note in (raw_pitch or {}).get("notes", []) if raw_pitch else []:
+    for note in pitch_notes:
         if not isinstance(note, dict):
             continue
         try:

@@ -7,8 +7,10 @@ missing side files, and legacy files produced by the current plugin.
 """
 
 import json
+import logging
 
 import pytest
+from fastapi import FastAPI
 
 import routes
 
@@ -190,3 +192,65 @@ def test_build_playback_payload_is_deterministic(tmp_path):
     second = routes._build_playback_payload("song.sloppak", tmp_path, manifest)
 
     assert first == second
+
+
+# ── GET /playback route (HTTP mapping) ──────────────────────────────────────
+#
+# No fastapi.testclient/httpx dependency in this plugin's requirements, so
+# these call the registered endpoint function directly (FastAPI keeps the
+# plain callable on `route.endpoint`) rather than spinning up an ASGI
+# client — enough to pin the status-code mapping the review asked for
+# without adding test-only runtime dependencies.
+
+def _playback_endpoint(tmp_path):
+    app = FastAPI()
+    routes.setup(app, {
+        "config_dir": tmp_path,
+        "get_dlc_dir": lambda: tmp_path,
+        "log": logging.getLogger("test.lyrics_karaoke.playback"),
+    })
+    for route in app.routes:
+        if getattr(route, "path", "") == "/api/plugins/lyrics_karaoke/playback":
+            return route.endpoint
+    raise AssertionError("playback route not registered")
+
+
+def test_playback_route_404_when_not_a_sloppak(tmp_path, monkeypatch):
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: None)
+
+    response = endpoint(filename="missing.sloppak")
+
+    assert response.status_code == 404
+
+
+def test_playback_route_404_when_no_lyrics(tmp_path, monkeypatch):
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: (tmp_path, {}, tmp_path, False))
+
+    response = endpoint(filename="song.sloppak")
+
+    assert response.status_code == 404
+
+
+def test_playback_route_422_on_corrupt_side_file(tmp_path, monkeypatch):
+    (tmp_path / "lyrics.json").write_text("{not json", encoding="utf-8")
+    manifest = {"lyrics": "lyrics.json"}
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: (tmp_path, manifest, tmp_path, False))
+
+    response = endpoint(filename="song.sloppak")
+
+    assert response.status_code == 422
+
+
+def test_playback_route_200_with_payload(tmp_path, monkeypatch):
+    (tmp_path / "lyrics.json").write_text(json.dumps([{"t": 0.0, "d": 0.5, "w": "hi"}]), encoding="utf-8")
+    manifest = {"lyrics": "lyrics.json"}
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: (tmp_path, manifest, tmp_path, False))
+
+    payload = endpoint(filename="song.sloppak")
+
+    assert payload["schema_version"] == routes.PLAYBACK_SCHEMA_VERSION
+    assert payload["voices"][0]["tokens"] == [{"start": 0.0, "duration": 0.5, "text": "hi"}]
