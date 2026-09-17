@@ -38,9 +38,32 @@ data contract before writing code.
 - Registers `renderer.create`/`renderer.destroy` under the **existing**
   plugin id `lyrics_karaoke` (see [Manifest scope](#manifest-scope-one-plugin-two-roles)).
   Consumes `/playback`; runs no extraction logic of its own.
-- Owns rendering (to be ported from Karaoke Highway's `screen.js` in #15),
-  microphone capture, live scoring, its own settings namespace, and
-  end-of-song results.
+- Owns rendering (ported from Karaoke Highway's `screen.js` across #15's
+  phases), microphone capture, live scoring, its own settings namespace,
+  and end-of-song results.
+
+**#15 phase 1 (shipped): the perspective stage.** The placeholder ribbon is
+replaced by the ported stage — note wall, diatonic (piano-key) pitch axis
+with natural-lane labels, horizon seam, violet lit-slab notes with gloss,
+duet guide bars, playhead, and the lyric band below the seam with
+per-syllable sung/active/upcoming colouring. All of it is a pure function
+of a per-panel view object (no DOM reads, no module state), windowed per
+frame by lower-bound entry plus a longest-token lookbehind.
+
+Deliberately deferred so each phase stays independently reviewable:
+countdown, bouncing ball and the summary card are **phase 2**; the
+key-rail tuner and voice-technique panels are **phase 3** (the stage
+reserves a narrow rail for them); and the accuracy tint on the sung
+portion of a slab, the sung-pitch trace, and the top stats band are
+**#11**, since they need scored results — the band's height is reserved at
+the reference's value so adding it moves no notes.
+
+Multi-voice is *rendered* here (scored voice as slabs, the rest as
+secondary flat guide bars on one shared axis) and exercised by synthetic
+multi-voice payloads in the tests, but nothing on this path invents
+voices: `/playback` builds `voices[]` from the singular spec'd keys and
+returns exactly one today. A test asserts `screen.js` never reads
+`vocal_tracks`, so duet **ingestion** stays FEP-gated as decided above.
 - Auto-selects for Vocals arrangements (see [Renderer
   selection](#renderer-selection)).
 

@@ -96,9 +96,18 @@
         });
     }
 
+    // A syllable's trailing marker is layout, not text: `-` joins to the
+    // next syllable, `+` ends the line (the WebSocket lyrics contract).
+    // Shared by the legacy overlay, whose tokens are `{w}`, and the
+    // visualization provider, whose canonical /playback tokens are
+    // `{text}` — one implementation, two call shapes.
+    function stripSyllableMarker(t) {
+        const s = String(t == null ? '' : t);
+        return (s.endsWith('+') || s.endsWith('-')) ? s.slice(0, -1) : s;
+    }
+
     function syllableText(s) {
-        const t = (s && s.w) || '';
-        return (t.endsWith('+') || t.endsWith('-')) ? t.slice(0, -1) : t;
+        return stripSyllableMarker(s && s.w);
     }
 
     function isSloppakSong(song) {
@@ -1952,7 +1961,41 @@
         return voices[0] || null;
     }
 
-    /** Normalize a voice's tokens into the shape `_vizDrawFrame` wants.
+    /** Every voice in a `/playback` payload, normalized, dropping any that
+     *  carry no usable tokens. Multi-voice payloads are RENDERED here (the
+     *  scored voice as slabs, the rest as guide bars) — but nothing on this
+     *  path invents them: `/playback` builds `voices[]` from the singular
+     *  spec'd `lyrics`/`vocal_pitch` keys and today always returns exactly
+     *  one. Duet INGESTION stays FEP-gated (#13/#16); this deliberately
+     *  does not read `vocal_tracks` or any other non-spec content path.
+     *  Exercised by synthetic multi-voice payloads in the tests. */
+    function _vizNormalizeVoices(payload) {
+        const raw = (payload && Array.isArray(payload.voices)) ? payload.voices : [];
+        const out = [];
+        for (let i = 0; i < raw.length; i++) {
+            const v = raw[i];
+            const tokens = _vizNormalizeTokens(v);
+            if (!tokens.length) continue;
+            out.push({
+                id: String((v && v.id) || ('v' + (i + 1))),
+                name: (v && typeof v.name === 'string' && v.name) ? v.name : null,
+                primary: !!(v && v.primary),
+                tokens,
+            });
+        }
+        if (out.length && !out.some((v) => v.primary)) out[0].primary = true;
+        return out;
+    }
+
+    /** Which voice this panel scores and draws as slabs. Prefers the
+     *  `primary` one; per-panel singer selection is #16. */
+    function _vizScoredIndex(voices) {
+        if (!voices || !voices.length) return -1;
+        const p = voices.findIndex((v) => v.primary);
+        return p >= 0 ? p : 0;
+    }
+
+    /** Normalize a voice's tokens into the shape the renderers want.
      *  The route already sorts and sanitizes (#13), so this only drops
      *  anything structurally unusable and coerces `midi` to a number or
      *  null — it must never re-implement the token contract. */
@@ -2083,6 +2126,407 @@
         ctx2d.fillRect(Math.round(W * PLAYHEAD_FRAC), 0, 2, H);
     }
 
+    // ── Perspective highway renderer (#15 phase 1) ──────────────────────
+    //
+    // PROVENANCE: the stage geometry, diatonic (piano-key) pitch axis,
+    // violet note-slab ramp, horizon seam, duet guide-bar treatment and
+    // lyric-band layout below are adapted from Karaoke Highway
+    // (https://github.com/Taynavv/feedback-vocals-viz, `screen.js`,
+    // AGPL-3.0) — the reference implementation this epic absorbs (#18).
+    // That plugin in turn adapted its ribbon geometry, pitch-range logic
+    // and palette from THIS plugin's overlay, so both directions of the
+    // port stay AGPL-3.0; see the epic and
+    // docs/architecture/vocals-visualization-integration.md.
+    //
+    // Adapted rather than copied: the reference reads its own
+    // `{t, d, w, midi}` route shape, while this consumes the canonical
+    // `/playback` `{start, duration, text, midi}` tokens (#13), and the
+    // scoring-dependent layers it interleaves (accuracy tint on the sung
+    // portion, the sung-pitch trace, the top stats band) are deliberately
+    // NOT ported here — they belong with the microphone consolidation in
+    // #11. The band they occupy is still reserved so #11 drops in without
+    // re-tuning the stage.
+
+    // Violet note ramp — the lit-slab look. Deliberately outside the
+    // red/amber/green accuracy family and the cool duet-guide hues.
+    const STAGE_NOTE_TOP = '#f0e7ff';
+    const STAGE_NOTE_MID = '#c084fc';
+    const STAGE_NOTE_DEEP = '#7c3aed';
+    const STAGE_NOTE_LOW = '#5b21b6';
+    const STAGE_WALL_TOP = '#0a0b14';
+    const STAGE_WALL_BOTTOM = '#0d1120';
+    const STAGE_LANE = 'rgba(255,255,255,0.05)';
+    const STAGE_LANE_LABEL = 'rgba(160,170,200,0.4)';
+    const STAGE_PLAYHEAD = 'rgba(56,189,248,0.95)';
+    const STAGE_LYRIC_SECONDARY = 'rgba(150,160,190,0.55)';
+
+    // Duet guide colours. Guides are SECONDARY by construction: flat, thin,
+    // cool, dim, no gradient/gloss/glow — those are reserved for the scored
+    // voice. They mark where another part goes for timing, and must never
+    // compete for attention.
+    const STAGE_VOICE_COLORS = [
+        'rgba(34,211,238,0.34)',   // teal — 2nd voice
+        'rgba(244,114,182,0.34)',  // pink — 3rd
+        'rgba(163,230,53,0.34)',   // lime — 4th
+    ];
+
+    const STAGE_SEAM_FRAC = 0.82;      // wall base / horizon; lyrics below
+    const STAGE_PLAYHEAD_FRAC = 0.30;  // further right than the flat ribbon
+    const STAGE_REF_HEIGHT = 480;      // `u` scale unit reference height
+
+    // Diatonic axis: naturals evenly spaced (one row per white key), sharps
+    // halfway between, so the pitch axis reads like piano keys rather than
+    // raw semitone spacing.
+    const SEMI_TO_DIA = [0, 0.5, 1, 1.5, 2, 3, 3.5, 4, 4.5, 5, 5.5, 6];
+    const NATURAL_PCS = [0, 2, 4, 5, 7, 9, 11];
+    const PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+    function _vizIsNatural(midi) {
+        return NATURAL_PCS.indexOf((((Math.round(midi)) % 12) + 12) % 12) >= 0;
+    }
+
+    function _vizDiaPos(midi) {
+        const r = Math.round(midi);
+        return Math.floor(r / 12) * 7 + SEMI_TO_DIA[((r % 12) + 12) % 12];
+    }
+
+    function _vizMidiToName(midi) {
+        const r = Math.round(midi);
+        return PITCH_NAMES[((r % 12) + 12) % 12] + (Math.floor(r / 12) - 1);
+    }
+
+    /** Diatonic range over every pitched token, widened so the wall fills
+     *  its height. Returns null for lyrics-only content — which is the
+     *  signal `draw` uses to fall back to the flat ribbon, exactly as the
+     *  reference does (its `_range` check). */
+    function _vizDiatonicRange(tokens) {
+        if (!Array.isArray(tokens)) return null;
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (const tok of tokens) {
+            if (tok && typeof tok.midi === 'number') {
+                if (tok.midi < lo) lo = tok.midi;
+                if (tok.midi > hi) hi = tok.midi;
+            }
+        }
+        if (!isFinite(lo)) return null;
+        lo = Math.round(lo);
+        hi = Math.round(hi);
+        // Widen to at least 5 diatonic steps so a one-note melody still
+        // sits mid-wall. Guarded against a pathological non-terminating
+        // widen the same way the reference guards it.
+        let guard = 0;
+        while (_vizDiaPos(hi) - _vizDiaPos(lo) < 5 && guard++ < 24) {
+            hi += 1;
+            if (_vizDiaPos(hi) - _vizDiaPos(lo) < 5) lo -= 1;
+        }
+        return {
+            midiLo: lo,
+            midiHi: hi,
+            dLo: _vizDiaPos(lo),
+            dHi: _vizDiaPos(hi),
+        };
+    }
+
+    /** One axis spanning EVERY voice, so a duet's guide bars land on the
+     *  same lanes as the scored voice instead of each voice being
+     *  auto-ranged independently. Equals `_vizDiatonicRange` for a solo. */
+    function _vizSharedDiatonicRange(voices) {
+        let all = [];
+        for (const v of (voices || [])) all = all.concat(v.tokens || []);
+        return _vizDiatonicRange(all);
+    }
+
+    function _vizRoundRect(ctx2d, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx2d.beginPath();
+        ctx2d.moveTo(x + rr, y);
+        ctx2d.arcTo(x + w, y, x + w, y + h, rr);
+        ctx2d.arcTo(x + w, y + h, x, y + h, rr);
+        ctx2d.arcTo(x, y + h, x, y, rr);
+        ctx2d.arcTo(x, y, x + w, y, rr);
+        ctx2d.closePath();
+        ctx2d.fill();
+    }
+
+    /** The horizon seam where the note wall meets its base. The reference
+     *  retired a receding floor grid in favour of this seam to reclaim
+     *  vertical space; keeping the seam keeps the depth read without
+     *  reprojecting notes. */
+    function _vizDrawSeam(ctx2d, w, seamY, u) {
+        const hg = ctx2d.createLinearGradient(0, seamY - 14 * u, 0, seamY + 14 * u);
+        hg.addColorStop(0, 'rgba(150,180,255,0)');
+        hg.addColorStop(0.5, 'rgba(150,180,255,0.30)');
+        hg.addColorStop(1, 'rgba(150,180,255,0)');
+        ctx2d.fillStyle = hg;
+        ctx2d.fillRect(0, seamY - 14 * u, w, 28 * u);
+        const lip = ctx2d.createLinearGradient(0, seamY, 0, seamY + 44 * u);
+        lip.addColorStop(0, 'rgba(40,60,140,0.10)');
+        lip.addColorStop(1, 'rgba(5,6,12,0)');
+        ctx2d.fillStyle = lip;
+        ctx2d.fillRect(0, seamY, w, 44 * u);
+        ctx2d.strokeStyle = 'rgba(200,220,255,0.6)';
+        ctx2d.lineWidth = Math.max(1, 1.5 * u);
+        ctx2d.beginPath();
+        ctx2d.moveTo(0, seamY);
+        ctx2d.lineTo(w, seamY);
+        ctx2d.stroke();
+    }
+
+    /** Group tokens into lyric lines. A `+` suffix on a syllable is an
+     *  explicit line break (the WebSocket lyrics contract); charts without
+     *  any breaks fall back to splitting on a >1.2s gap. */
+    function _vizBuildLines(tokens) {
+        const hasBreaks = tokens.some((tok) => String(tok.text || '').endsWith('+'));
+        const groups = [];
+        let cur = [];
+        let lastEnd = -Infinity;
+        for (let i = 0; i < tokens.length; i++) {
+            const raw = String(tokens[i].text || '');
+            if (cur.length && !hasBreaks && tokens[i].start - lastEnd > 1.2) {
+                groups.push(cur);
+                cur = [];
+            }
+            cur.push(i);
+            lastEnd = tokens[i].start + (tokens[i].duration || 0);
+            if (raw.endsWith('+')) {
+                groups.push(cur);
+                cur = [];
+            }
+        }
+        if (cur.length) groups.push(cur);
+        return groups.map((idxs) => {
+            const last = tokens[idxs[idxs.length - 1]];
+            return {
+                t0: tokens[idxs[0]].start,
+                t1: last.start + (last.duration || 0),
+                parts: idxs.map((i) => {
+                    const raw = String(tokens[i].text || '');
+                    return { idx: i, text: stripSyllableMarker(raw), join: raw.endsWith('-') };
+                }),
+            };
+        });
+    }
+
+    /** One centred lyric line, per-syllable coloured against `now`:
+     *  sung = gold, active = white, upcoming = dim. Shrinks to fit rather
+     *  than overflowing the stage. */
+    function _vizDrawLyricLine(ctx2d, tokens, line, now, areaX, areaW, fontPx, y, primary) {
+        const maxW = areaW * 0.96;
+        const weight = primary ? 'bold ' : '';
+        let font = fontPx;
+        const piece = (part, p) => part.text
+            + (part.join || p === line.parts.length - 1 ? '' : ' ');
+        const measure = () => {
+            let total = 0;
+            for (let p = 0; p < line.parts.length; p++) {
+                total += ctx2d.measureText(piece(line.parts[p], p)).width;
+            }
+            return total;
+        };
+        ctx2d.font = weight + font + 'px sans-serif';
+        let total = measure();
+        if (total > maxW && total > 0) {
+            font = Math.max(11, Math.floor(font * (maxW / total)));
+            ctx2d.font = weight + font + 'px sans-serif';
+            total = measure();
+        }
+        ctx2d.textAlign = 'left';
+        ctx2d.textBaseline = 'middle';
+        let x = areaX + (areaW - total) / 2;
+        for (let p = 0; p < line.parts.length; p++) {
+            const part = line.parts[p];
+            const tok = tokens[part.idx];
+            const text = piece(part, p);
+            if (!primary) {
+                ctx2d.fillStyle = STAGE_LYRIC_SECONDARY;
+            } else if (tok.start + (tok.duration || 0) <= now) {
+                ctx2d.fillStyle = BAR_COLOR_FILL;      // sung
+            } else if (tok.start <= now) {
+                ctx2d.fillStyle = '#ffffff';           // active syllable
+            } else {
+                ctx2d.fillStyle = TEXT_COLOR_PAST;     // upcoming
+            }
+            ctx2d.fillText(text, x, y);
+            x += ctx2d.measureText(text).width;
+        }
+    }
+
+    /** The lyric band below the seam: the current line plus a dim preview
+     *  of the next. The bouncing ball and the silent-lead-in countdown that
+     *  ride under these words are #15 phase 2. */
+    function _vizDrawLyricBand(ctx2d, tokens, lines, now, railW, W, H, seamY, u) {
+        if (!lines || !lines.length) return;
+        let li = 0;
+        // Hold the finished line for a beat before advancing, so the last
+        // syllable doesn't vanish the instant it's sung.
+        while (li < lines.length && now >= lines[li].t1 + 0.3) li++;
+        if (li >= lines.length) return;
+        const cy = seamY + (H - seamY) * 0.20;
+        const fontPx = Math.max(16, Math.round(Math.min(36 * u, 44)));
+        const areaX = railW;
+        const areaW = W - railW;
+        _vizDrawLyricLine(ctx2d, tokens, lines[li], now, areaX, areaW, fontPx, cy, true);
+        if (li + 1 < lines.length) {
+            _vizDrawLyricLine(ctx2d, tokens, lines[li + 1], now, areaX, areaW,
+                Math.max(12, Math.round(fontPx * 0.55)), cy + fontPx * 1.4, false);
+        }
+    }
+
+    /** The perspective stage: note wall, diatonic lanes, horizon seam,
+     *  duet guide bars, violet note slabs, playhead, lyric band.
+     *
+     *  Pure in its inputs (no DOM reads, no module state) so it stays
+     *  per-panel and unit-testable, and windowed per frame — `tokens` is
+     *  start-sorted, so each voice is entered at a lower bound and left on
+     *  the first token past the right edge. `lookbehind` is the song's
+     *  longest token so a note held across the window's left edge still
+     *  draws. */
+    function _vizDrawStage(ctx2d, W, H, view, now) {
+        const range = view.range;
+        const voices = view.voices;
+        const tokens = view.tokens;
+        const u = H / STAGE_REF_HEIGHT;
+
+        const wallTop = 8 * u;
+        // Reserved for the score / streak / accuracy band (#11). Kept at the
+        // reference's height so adding it later doesn't move the notes.
+        const topStatsH = 42 * u;
+        const seamY = Math.round(H * STAGE_SEAM_FRAC);
+        // Narrow rail: the key-rail gauge and voice-technique panel that
+        // widen this are #15 phase 3.
+        const railW = Math.round(10 * u);
+        const noteTop = wallTop + topStatsH;
+        const noteBottom = seamY;
+
+        const dLo = range.dLo;
+        const dHi = range.dHi;
+        const dSpan = Math.max(1, dHi - dLo);
+        const usable = noteBottom - noteTop;
+        const barH = Math.max(8, Math.min((usable / dSpan) * 0.86, 40 * u));
+        const pxPerSec = W / VISIBLE_SECONDS;
+        const playheadX = railW + (W - railW) * STAGE_PLAYHEAD_FRAC;
+        const xFor = (t) => playheadX + (t - now) * pxPerSec;
+        const yFor = (m) => noteTop + ((dHi - _vizDiaPos(m)) / dSpan) * (usable - barH);
+        const lookbehind = view.maxDuration > 0 ? view.maxDuration : 0;
+        const tMin = now - STAGE_PLAYHEAD_FRAC * VISIBLE_SECONDS - 1;
+        const tMax = now + (1 - STAGE_PLAYHEAD_FRAC) * VISIBLE_SECONDS + 1;
+        const windowStart = tMin - lookbehind;
+
+        ctx2d.clearRect(0, 0, W, H);
+        ctx2d.save();
+        ctx2d.beginPath();
+        ctx2d.rect(0, 0, W, H);
+        ctx2d.clip();
+
+        // ── Wall backdrop + natural pitch lanes ──
+        const wg = ctx2d.createLinearGradient(0, 0, 0, seamY);
+        wg.addColorStop(0, STAGE_WALL_TOP);
+        wg.addColorStop(1, STAGE_WALL_BOTTOM);
+        ctx2d.fillStyle = wg;
+        ctx2d.fillRect(0, 0, W, seamY);
+        ctx2d.lineWidth = 1;
+        ctx2d.font = Math.max(8, Math.round(9 * u)) + 'px sans-serif';
+        ctx2d.textAlign = 'left';
+        ctx2d.textBaseline = 'middle';
+        for (let m = range.midiLo; m <= range.midiHi; m++) {
+            if (!_vizIsNatural(m)) continue;
+            const y = yFor(m) + barH / 2;
+            ctx2d.strokeStyle = STAGE_LANE;
+            ctx2d.beginPath();
+            ctx2d.moveTo(railW, y);
+            ctx2d.lineTo(W, y);
+            ctx2d.stroke();
+            ctx2d.fillStyle = STAGE_LANE_LABEL;
+            ctx2d.fillText(_vizMidiToName(m), railW + 5 * u, y);
+        }
+
+        _vizDrawSeam(ctx2d, W, seamY, u);
+
+        const pad = 2 * u;
+        const radius = 6 * u;
+
+        // ── Duet guides: every voice EXCEPT the scored one ──
+        if (voices.length > 1) {
+            const guideH = Math.max(3, barH * 0.4);
+            const guideR = Math.min(radius, guideH / 2);
+            for (let vi = 0; vi < voices.length; vi++) {
+                if (vi === view.scoredIdx) continue;
+                const vt = voices[vi].tokens;
+                // Index the palette by position among the GUIDES, so the
+                // first guide is always teal whichever voice is scored.
+                const ci = (vi > view.scoredIdx ? vi - 1 : vi) % STAGE_VOICE_COLORS.length;
+                ctx2d.fillStyle = STAGE_VOICE_COLORS[ci];
+                let gi = _vizLowerBound(vt, windowStart);
+                for (; gi < vt.length; gi++) {
+                    const gt = vt[gi];
+                    if (gt.start > tMax) break;
+                    if (gt.midi === null) continue;
+                    if (gt.start + gt.duration < tMin) continue;
+                    const gx0 = xFor(gt.start);
+                    const gw = Math.max(2, xFor(gt.start + gt.duration) - gx0 - 2 * pad);
+                    const gy = yFor(gt.midi) + (barH - guideH) / 2;
+                    _vizRoundRect(ctx2d, gx0 + pad, gy, gw, guideH, guideR);
+                }
+            }
+        }
+
+        // ── Scored voice: violet lit slabs ──
+        let i = _vizLowerBound(tokens, windowStart);
+        for (; i < tokens.length; i++) {
+            const tok = tokens[i];
+            if (tok.start > tMax) break;
+            if (tok.midi === null) continue;
+            const end = tok.start + tok.duration;
+            if (end < tMin) continue;
+
+            const x0 = xFor(tok.start);
+            const x = x0 + pad;
+            const w = Math.max(2, xFor(end) - x0 - 2 * pad);
+            const y = yFor(tok.midi);
+            const isPast = end <= now;
+            const isActive = tok.start <= now && now < end;
+
+            const g = ctx2d.createLinearGradient(0, y, 0, y + barH);
+            if (isActive) {
+                g.addColorStop(0, STAGE_NOTE_TOP);
+                g.addColorStop(1, STAGE_NOTE_DEEP);
+                ctx2d.shadowColor = STAGE_NOTE_MID;
+                ctx2d.shadowBlur = 22 * u;
+            } else if (isPast) {
+                g.addColorStop(0, STAGE_NOTE_MID);
+                g.addColorStop(1, STAGE_NOTE_LOW);
+            } else {
+                g.addColorStop(0, 'rgba(168,85,247,0.6)');
+                g.addColorStop(1, 'rgba(109,40,217,0.5)');
+            }
+            ctx2d.fillStyle = g;
+            _vizRoundRect(ctx2d, x, y, w, barH, radius);
+            ctx2d.shadowBlur = 0;
+
+            // The accuracy tint over the sung portion of the slab is #11's —
+            // it needs scored results, and it draws between the slab and
+            // this gloss so the sung part reads lit rather than flat.
+
+            ctx2d.fillStyle = isActive ? 'rgba(255,255,255,0.85)' : 'rgba(235,230,255,0.30)';
+            _vizRoundRect(ctx2d, x + 2 * u, y + 1.5 * u,
+                Math.max(1, w - 4 * u), 2.5 * u, 1.5 * u);
+        }
+
+        // The sung-pitch history trace belongs here, under the playhead (#11).
+
+        ctx2d.strokeStyle = STAGE_PLAYHEAD;
+        ctx2d.lineWidth = Math.max(1.5, 2 * u);
+        ctx2d.beginPath();
+        ctx2d.moveTo(playheadX, noteTop - 6 * u);
+        ctx2d.lineTo(playheadX, seamY);
+        ctx2d.stroke();
+
+        _vizDrawLyricBand(ctx2d, tokens, view.lines, now, railW, W, H, seamY, u);
+
+        ctx2d.restore();
+    }
+
     /** One renderer instance. A FRESH object per factory call — splitscreen
      *  mounts one per panel and each must be independent (core's
      *  setRenderer contract). Every mutable field lives in this closure. */
@@ -2090,8 +2534,12 @@
         let ctx2d = null;
         let initialized = false;
         let destroyed = false;
-        let tokens = [];
-        let range = null;
+        let tokens = [];          // the SCORED voice's tokens
+        let voices = [];          // every voice, for duet guide bars
+        let scoredIdx = -1;
+        let range = null;         // flat-ribbon pitch range (null = lyrics-only)
+        let stageRange = null;    // diatonic axis, shared across voices
+        let lines = null;         // lyric lines, built once per load
         let maxDuration = 0;
         let loadedKey = null;      // key we have data for
         let requestedKey = null;   // key a load is in flight for
@@ -2117,7 +2565,11 @@
 
         function clearData() {
             tokens = [];
+            voices = [];
+            scoredIdx = -1;
             range = null;
+            stageRange = null;
+            lines = null;
             maxDuration = 0;
             loadedKey = null;
         }
@@ -2164,16 +2616,23 @@
                     });
                     return;
                 }
-                const voice = _vizPickVoice(res.body);
-                tokens = _vizNormalizeTokens(voice);
+                voices = _vizNormalizeVoices(res.body);
+                scoredIdx = _vizScoredIndex(voices);
+                tokens = scoredIdx >= 0 ? voices[scoredIdx].tokens : [];
                 range = _vizPitchRange(tokens);
+                // One axis across every voice so a duet's guides share lanes
+                // with the scored voice instead of each being auto-ranged.
+                stageRange = voices.length > 1
+                    ? _vizSharedDiatonicRange(voices)
+                    : _vizDiatonicRange(tokens);
+                lines = _vizBuildLines(tokens);
                 maxDuration = _vizMaxDuration(tokens);
                 loadedKey = key;
                 _vizEmit('lyrics_karaoke:renderer-ready', {
                     filename,
                     arrangementIndex: arrIndex,
                     schemaVersion: (res.body && res.body.schema_version) || null,
-                    voiceId: (voice && voice.id) || null,
+                    voiceId: scoredIdx >= 0 ? voices[scoredIdx].id : null,
                     voices: (res.body && Array.isArray(res.body.voices)) ? res.body.voices.length : 0,
                     tokens: tokens.length,
                     pitched: range !== null,
@@ -2257,6 +2716,21 @@
                 const W = ctx2d.canvas ? ctx2d.canvas.width : 0;
                 const H = ctx2d.canvas ? ctx2d.canvas.height : 0;
                 if (!W || !H) return;
+                // The stage is the only offered look; a lyrics-only song has
+                // no pitch axis to place notes on, so it falls back to the
+                // flat ribbon silently — not a user-facing mode toggle.
+                // Mirrors the reference's `this._range` check.
+                if (stageRange) {
+                    _vizDrawStage(ctx2d, W, H, {
+                        range: stageRange,
+                        voices,
+                        scoredIdx,
+                        tokens,
+                        lines,
+                        maxDuration,
+                    }, now);
+                    return;
+                }
                 _vizDrawFrame(ctx2d, W, H, tokens, now, range, maxDuration);
             },
 
@@ -2366,7 +2840,17 @@
             _vizMatchesArrangement,
             _vizSongKey,
             _vizPickVoice,
+            _vizNormalizeVoices,
+            _vizScoredIndex,
             _vizNormalizeTokens,
+            _vizDiaPos,
+            _vizIsNatural,
+            _vizMidiToName,
+            _vizDiatonicRange,
+            _vizSharedDiatonicRange,
+            _vizBuildLines,
+            _vizDrawStage,
+            stripSyllableMarker,
             _vizPitchRange,
             _vizMaxDuration,
             _vizLowerBound,

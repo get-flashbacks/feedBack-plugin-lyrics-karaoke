@@ -47,11 +47,44 @@ function makeCanvas(opts) {
     const ctx = {
         canvas: null,
         calls: [],
+        // Recorded per-draw geometry, so tests can assert WHERE things
+        // landed (lane/guide/slab placement) rather than only that some
+        // drawing happened.
+        rects: [],
+        texts: [],
+        gradients: [],
+        fills: [],
         clearRect() { this.calls.push('clearRect'); },
-        fillRect() { this.calls.push('fillRect'); },
-        fillText() { this.calls.push('fillText'); },
-        set fillStyle(_v) { /* recorded via calls only */ },
-        get fillStyle() { return '#000'; },
+        fillRect(x, y, w, h) {
+            this.calls.push('fillRect');
+            this.rects.push({ x, y, w, h, fill: this._fill });
+        },
+        fillText(t, x, y) {
+            this.calls.push('fillText');
+            this.texts.push({ t: String(t), x, y, fill: this._fill });
+        },
+        measureText(t) { return { width: String(t).length * 6 }; },
+        save() { this.calls.push('save'); },
+        restore() { this.calls.push('restore'); },
+        beginPath() {},
+        closePath() {},
+        rect() {},
+        clip() {},
+        moveTo() {},
+        lineTo() {},
+        arcTo() {},
+        stroke() { this.calls.push('stroke'); },
+        fill() { this.calls.push('fill'); this.fills.push(this._fill); },
+        createLinearGradient() {
+            const g = { stops: [], addColorStop(o2, c) { this.stops.push([o2, c]); } };
+            ctx.gradients.push(g);
+            return g;
+        },
+        // Captured so tests can assert the per-syllable / per-slab colour
+        // state, not merely that something was painted.
+        _fill: null,
+        set fillStyle(v) { this._fill = v; },
+        get fillStyle() { return this._fill; },
     };
     const canvas = {
         width: o.width === undefined ? 800 : o.width,
@@ -805,4 +838,417 @@ test('a throwing peer plugin does not break renderer init', async () => {
     } finally {
         removeNoteDetect();
     }
+});
+
+// ── Phase 1: diatonic pitch axis ────────────────────────────────────────
+
+test('diatonic axis spaces naturals evenly and sharps halfway', () => {
+    const d = screen._vizDiaPos;
+    // C4..C5 is 7 diatonic steps (one row per white key).
+    assert.strictEqual(d(72) - d(60), 7);
+    // E->F and B->C are adjacent white keys: one step, no black key between.
+    assert.strictEqual(d(65) - d(64), 1);   // E4 -> F4
+    assert.strictEqual(d(72) - d(71), 1);   // B4 -> C5
+    // C->D spans a black key, so C#4 sits halfway.
+    assert.strictEqual(d(62) - d(60), 1);
+    assert.strictEqual(d(61) - d(60), 0.5);
+});
+
+test('naturals are identified by pitch class, octave-independent', () => {
+    const nat = screen._vizIsNatural;
+    for (const m of [60, 62, 64, 65, 67, 69, 71, 72, 48, 84]) {
+        assert.strictEqual(nat(m), true, `midi ${m}`);
+    }
+    for (const m of [61, 63, 66, 68, 70, 49, 85]) {
+        assert.strictEqual(nat(m), false, `midi ${m}`);
+    }
+});
+
+test('midi names use scientific pitch notation', () => {
+    assert.strictEqual(screen._vizMidiToName(60), 'C4');
+    assert.strictEqual(screen._vizMidiToName(69), 'A4');
+    assert.strictEqual(screen._vizMidiToName(61), 'C#4');
+    assert.strictEqual(screen._vizMidiToName(21), 'A0');
+});
+
+test('diatonic range is null for lyrics-only content', () => {
+    // This null is the signal that selects the flat-ribbon fallback.
+    assert.strictEqual(screen._vizDiatonicRange([
+        { start: 0, duration: 1, text: 'a', midi: null },
+    ]), null);
+    assert.strictEqual(screen._vizDiatonicRange([]), null);
+    assert.strictEqual(screen._vizDiatonicRange(null), null);
+});
+
+test('diatonic range widens a narrow melody to fill the wall', () => {
+    const r = screen._vizDiatonicRange([
+        { start: 0, duration: 1, text: 'a', midi: 60 },
+        { start: 1, duration: 1, text: 'b', midi: 62 },
+    ]);
+    assert.ok(r.dHi - r.dLo >= 5, 'must widen to at least 5 diatonic steps');
+    assert.ok(r.midiLo <= 60 && r.midiHi >= 62, 'must still contain the melody');
+});
+
+test('diatonic range terminates on a single-note melody', () => {
+    // The widen loop is guarded; a one-note song must not hang it.
+    const r = screen._vizDiatonicRange([{ start: 0, duration: 1, text: 'a', midi: 60 }]);
+    assert.ok(r && r.dHi - r.dLo >= 5);
+});
+
+test('the shared axis spans every voice, not just the scored one', () => {
+    const solo = screen._vizDiatonicRange([{ start: 0, duration: 1, text: 'a', midi: 60 }]);
+    const shared = screen._vizSharedDiatonicRange([
+        { tokens: [{ start: 0, duration: 1, text: 'a', midi: 60 }] },
+        { tokens: [{ start: 0, duration: 1, text: 'b', midi: 79 }] },
+    ]);
+    assert.ok(shared.midiHi >= 79, 'must reach the highest voice');
+    assert.ok(shared.midiLo <= 60, 'must reach the lowest voice');
+    assert.ok(shared.dHi - shared.dLo > solo.dHi - solo.dLo, 'wider than solo');
+});
+
+// ── Phase 1: voice normalization (no non-spec content path) ─────────────
+
+test('normalizes every voice and defaults a primary', () => {
+    const voices = screen._vizNormalizeVoices({
+        voices: [
+            { id: 'lead', name: 'Lead', tokens: [{ start: 0, duration: 1, text: 'a', midi: 60 }] },
+            { id: 'harm', name: 'Harmony', tokens: [{ start: 0, duration: 1, text: 'b', midi: 64 }] },
+        ],
+    });
+    assert.strictEqual(voices.length, 2);
+    assert.strictEqual(voices[0].primary, true, 'first voice becomes primary');
+    assert.strictEqual(voices[1].primary, false);
+    assert.strictEqual(voices[1].name, 'Harmony');
+});
+
+test('honours an explicit primary and synthesizes missing ids', () => {
+    const voices = screen._vizNormalizeVoices({
+        voices: [
+            { tokens: [{ start: 0, duration: 1, text: 'a', midi: 60 }] },
+            { primary: true, tokens: [{ start: 0, duration: 1, text: 'b', midi: 64 }] },
+        ],
+    });
+    assert.deepStrictEqual(voices.map((v) => v.id), ['v1', 'v2']);
+    assert.strictEqual(screen._vizScoredIndex(voices), 1);
+});
+
+test('drops voices with no usable tokens', () => {
+    const voices = screen._vizNormalizeVoices({
+        voices: [
+            { id: 'a', tokens: [{ start: 0, duration: 1, text: 'x', midi: 60 }] },
+            { id: 'empty', tokens: [] },
+            { id: 'junk', tokens: [{ start: 'nope' }] },
+        ],
+    });
+    assert.deepStrictEqual(voices.map((v) => v.id), ['a']);
+});
+
+test('reads ONLY voices[] — never a non-spec content path', () => {
+    // Duet ingestion is FEP-gated: rendering multiple voices is supported,
+    // but nothing here may read `vocal_tracks` (the reference plugin's
+    // non-spec manifest extension) or any other off-spec key.
+    const voices = screen._vizNormalizeVoices({
+        vocal_tracks: [
+            { id: 'v1', lyrics: 'lyrics.json' },
+            { id: 'v2', lyrics: 'lyrics_v2.json' },
+        ],
+        tokens: [{ start: 0, duration: 1, text: 'legacy', midi: 60 }],
+    });
+    assert.deepStrictEqual(voices, [], 'only voices[] is a content source');
+    const src = require('node:fs').readFileSync(
+        path.join(__dirname, '..', 'screen.js'), 'utf8',
+    );
+    // Allowed in prose (the comment explaining the gate); never as a read.
+    assert.ok(!/\.vocal_tracks|\['vocal_tracks'\]|\["vocal_tracks"\]/.test(src),
+        'screen.js must not read vocal_tracks');
+});
+
+test('scored index is -1 when there are no voices', () => {
+    assert.strictEqual(screen._vizScoredIndex([]), -1);
+    assert.strictEqual(screen._vizScoredIndex(null), -1);
+});
+
+// ── Phase 1: lyric line grouping ────────────────────────────────────────
+
+test('a + suffix breaks the lyric line', () => {
+    const lines = screen._vizBuildLines([
+        { start: 0, duration: 0.5, text: 'hel' },
+        { start: 0.5, duration: 0.5, text: 'lo+' },
+        { start: 1, duration: 0.5, text: 'there' },
+    ]);
+    assert.strictEqual(lines.length, 2);
+    assert.deepStrictEqual(lines[0].parts.map((p) => p.text), ['hel', 'lo']);
+    assert.strictEqual(lines[1].parts[0].text, 'there');
+});
+
+test('a - suffix joins a syllable to the next with no space', () => {
+    const lines = screen._vizBuildLines([
+        { start: 0, duration: 0.5, text: 'hel-' },
+        { start: 0.5, duration: 0.5, text: 'lo' },
+    ]);
+    assert.strictEqual(lines[0].parts[0].join, true);
+    assert.strictEqual(lines[0].parts[0].text, 'hel', 'marker stripped from display');
+});
+
+test('with no explicit breaks, a long gap starts a new line', () => {
+    const lines = screen._vizBuildLines([
+        { start: 0, duration: 0.5, text: 'one' },
+        { start: 5, duration: 0.5, text: 'two' },   // >1.2s gap
+    ]);
+    assert.strictEqual(lines.length, 2);
+});
+
+test('line bounds span first onset to last offset', () => {
+    const lines = screen._vizBuildLines([
+        { start: 1, duration: 0.5, text: 'a' },
+        { start: 2, duration: 0.25, text: 'b' },
+    ]);
+    assert.strictEqual(lines[0].t0, 1);
+    assert.strictEqual(lines[0].t1, 2.25);
+});
+
+// ── Phase 1: the stage ──────────────────────────────────────────────────
+
+function stageView(over) {
+    const tokens = (over && over.tokens) || [
+        { start: 1, duration: 0.5, text: 'hel', midi: 60 },
+        { start: 1.5, duration: 0.5, text: 'lo', midi: 64 },
+    ];
+    const voices = (over && over.voices) || [
+        { id: 'primary', name: 'Vocals', primary: true, tokens },
+    ];
+    const scoredIdx = over && over.scoredIdx !== undefined ? over.scoredIdx : 0;
+    return Object.assign({
+        range: screen._vizSharedDiatonicRange(voices),
+        voices,
+        scoredIdx,
+        tokens: voices[scoredIdx] ? voices[scoredIdx].tokens : tokens,
+        lines: screen._vizBuildLines(voices[scoredIdx] ? voices[scoredIdx].tokens : tokens),
+        maxDuration: screen._vizMaxDuration(tokens),
+    }, over || {});
+}
+
+test('the stage draws lanes, a seam, slabs and the playhead', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView(), 1.2);
+
+    assert.ok(ctx.calls.includes('clearRect'));
+    assert.ok(ctx.calls.includes('save') && ctx.calls.includes('restore'),
+        'stage must clip and restore');
+    assert.ok(ctx.calls.includes('stroke'), 'lanes/seam/playhead stroke');
+    assert.ok(ctx.calls.filter((c) => c === 'fill').length > 0, 'slabs are filled paths');
+    assert.ok(ctx.gradients.length > 0, 'wall + slabs use gradients');
+});
+
+test('the stage labels natural pitch lanes only', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView(), 1.2);
+
+    const labels = ctx.texts.map((t) => t.t).filter((t) => /^[A-G]#?-?\d+$/.test(t));
+    assert.ok(labels.length > 0, 'expected pitch-lane labels');
+    assert.ok(labels.every((l) => !l.includes('#')), `no sharp lanes: ${labels}`);
+});
+
+test('the stage keeps lyrics below the horizon seam', () => {
+    const H = 480;
+    const canvas = makeCanvas({ width: 960, height: H });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, H, stageView(), 1.2);
+
+    const seamY = Math.round(H * 0.82);
+    const words = ctx.texts.filter((t) => t.t.trim() === 'hel' || t.t.trim() === 'lo');
+    assert.ok(words.length > 0, 'lyrics must render');
+    assert.ok(words.every((w) => w.y > seamY), 'lyrics belong below the seam');
+
+    const lanes = ctx.texts.filter((t) => /^[A-G]-?\d+$/.test(t.t));
+    assert.ok(lanes.every((l) => l.y < seamY), 'pitch lanes belong above the seam');
+});
+
+test('the active syllable, sung syllables and upcoming ones differ', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    // now = 1.6 → "hel" (1.0-1.5) sung, "lo" (1.5-2.0) active.
+    screen._vizDrawStage(ctx, 960, 480, stageView(), 1.6);
+    const byText = {};
+    for (const t of ctx.texts) byText[t.t.trim()] = t.fill;
+    assert.strictEqual(byText.lo, '#ffffff', 'active syllable is white');
+    assert.notStrictEqual(byText.hel, byText.lo, 'sung syllable differs from active');
+});
+
+test('a duet renders guide bars for the unscored voice on shared lanes', () => {
+    const lead = [{ start: 1, duration: 0.5, text: 'a', midi: 60 }];
+    const harm = [{ start: 1, duration: 0.5, text: 'b', midi: 67 }];
+    const voices = [
+        { id: 'lead', name: 'Lead', primary: true, tokens: lead },
+        { id: 'harm', name: 'Harmony', primary: false, tokens: harm },
+    ];
+    const solo = makeCanvas({ width: 960, height: 480 });
+    const duet = makeCanvas({ width: 960, height: 480 });
+    screen._vizDrawStage(solo.getContext('2d'), 960, 480,
+        stageView({ voices: [voices[0]], scoredIdx: 0 }), 1.2);
+    screen._vizDrawStage(duet.getContext('2d'), 960, 480,
+        stageView({ voices, scoredIdx: 0 }), 1.2);
+
+    assert.ok(duet._ctx.calls.filter((c) => c === 'fill').length
+        > solo._ctx.calls.filter((c) => c === 'fill').length,
+        'the duet draws extra bars for the guide voice');
+});
+
+test('the first guide bar is teal whichever voice is scored', () => {
+    // Guides are coloured by position among the GUIDES, not by voice index,
+    // so the first guide reads the same whichever part the user sings.
+    const voices = [
+        { id: 'a', primary: false, tokens: [{ start: 1, duration: 0.5, text: 'a', midi: 60 }] },
+        { id: 'b', primary: false, tokens: [{ start: 1, duration: 0.5, text: 'b', midi: 67 }] },
+    ];
+    const TEAL = 'rgba(34,211,238,0.34)';
+    for (const scoredIdx of [0, 1]) {
+        const canvas = makeCanvas({ width: 960, height: 480 });
+        const ctx = canvas.getContext('2d');
+        screen._vizDrawStage(ctx, 960, 480, stageView({ voices, scoredIdx }), 1.2);
+        assert.ok(ctx.fills.includes(TEAL),
+            `scored ${scoredIdx}: expected a teal guide bar, got ${JSON.stringify(ctx.fills)}`);
+    }
+});
+
+test('guide bars are flat colours, never the scored voice gradient', () => {
+    // The whole point of the guide treatment: no gradient, gloss or glow —
+    // those are reserved for the voice being scored.
+    const voices = [
+        { id: 'lead', primary: true, tokens: [{ start: 1, duration: 0.5, text: 'a', midi: 60 }] },
+        { id: 'harm', primary: false, tokens: [{ start: 1, duration: 0.5, text: 'b', midi: 67 }] },
+    ];
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({ voices, scoredIdx: 0 }), 1.2);
+
+    const guideFills = ctx.fills.filter((f) => typeof f === 'string' && f.startsWith('rgba(34,211,238'));
+    assert.strictEqual(guideFills.length, 1, 'one guide bar for one guide token');
+    // The scored voice's slab is a gradient object, not a colour string.
+    assert.ok(ctx.fills.some((f) => f && typeof f === 'object' && Array.isArray(f.stops)),
+        'the scored voice draws a gradient slab');
+});
+
+test('the stage falls back to nothing drawn on a zero-span canvas', () => {
+    // Guards the divide-by-zero paths in the axis mapping.
+    const canvas = makeCanvas({ width: 10, height: 10 });
+    const ctx = canvas.getContext('2d');
+    assert.doesNotThrow(() => screen._vizDrawStage(ctx, 10, 10, stageView(), 1.2));
+});
+
+test('the stage culls to the visible window on a long song', () => {
+    const tokens = [];
+    for (let i = 0; i < 20000; i++) {
+        tokens.push({ start: 100 + i, duration: 0.2, text: 't', midi: 60 + (i % 12) });
+    }
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({
+        voices: [{ id: 'p', primary: true, tokens }],
+        scoredIdx: 0,
+    }), 0);
+    // Nothing is in view at t=0, so no slab should be filled. Lane strokes
+    // and the wall still draw; what must NOT happen is 20k slab fills.
+    assert.ok(ctx.calls.filter((c) => c === 'fill').length < 50,
+        'must not walk the whole song per frame');
+});
+
+// ── Phase 1: stage vs flat-ribbon dispatch through the renderer ─────────
+
+test('a pitched song renders through the stage', async () => {
+    fetchImpl = jsonFetch(okPayload([
+        { start: 1, duration: 0.5, text: 'hel', midi: 60 },
+        { start: 1.5, duration: 0.5, text: 'lo', midi: 64 },
+    ]));
+    const r = window.feedBackViz_lyrics_karaoke();
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    r.init(canvas, bundle());
+    await flush();
+    r.draw(bundle({ currentTime: 1.2 }));
+    assert.ok(canvas._ctx.calls.includes('save'), 'stage clips; the flat ribbon does not');
+    assert.ok(canvas._ctx.texts.some((t) => /^[A-G]-?\d+$/.test(t.t)),
+        'stage draws pitch lanes');
+    r.destroy();
+});
+
+test('a lyrics-only song silently keeps the flat-ribbon path', async () => {
+    // The constraint from #10: lyrics-only is a valid /playback shape and
+    // stays in the provider, on the flat ribbon — NOT handed to the legacy
+    // overlay, and not a user-facing mode toggle.
+    fetchImpl = jsonFetch(okPayload([
+        { start: 1, duration: 0.5, text: 'hel' },
+        { start: 1.5, duration: 0.5, text: 'lo' },
+    ]));
+    const r = window.feedBackViz_lyrics_karaoke();
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    r.init(canvas, bundle());
+    await flush();
+    r.draw(bundle({ currentTime: 1.2 }));
+
+    assert.ok(canvas._ctx.calls.includes('clearRect'), 'still renders');
+    assert.ok(!canvas._ctx.calls.includes('save'), 'must not take the stage path');
+    assert.ok(canvas._ctx.texts.some((t) => t.t.trim() === 'hel'), 'lyrics still drawn');
+    assert.ok(!canvas._ctx.texts.some((t) => /^[A-G]-?\d+$/.test(t.t)),
+        'no pitch lanes without a pitch axis');
+    r.destroy();
+});
+
+test('a song switch from pitched to lyrics-only swaps the path', async () => {
+    fetchImpl = (url) => jsonFetch(url.includes('plain.sloppak')
+        ? okPayload([{ start: 1, duration: 0.5, text: 'x' }])
+        : okPayload([{ start: 1, duration: 0.5, text: 'a', midi: 60 }]))();
+    const r = window.feedBackViz_lyrics_karaoke();
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    r.init(canvas, bundle());
+    await flush();
+    r.draw(bundle({ currentTime: 1.2 }));
+    assert.ok(canvas._ctx.calls.includes('save'), 'pitched song uses the stage');
+
+    const plain = bundle({
+        songInfo: { filename: 'plain.sloppak', arrangement_index: 0, arrangement: 'Vocals' },
+    });
+    r.draw(plain);
+    await flush();
+    canvas._ctx.calls.length = 0;
+    r.draw(plain);
+    assert.ok(!canvas._ctx.calls.includes('save'),
+        'stage state must not leak across a song switch');
+    r.destroy();
+});
+
+test('renderer-ready reports the scored voice id', async () => {
+    bus.reset();
+    fetchImpl = jsonFetch({
+        schema_version: 1,
+        song: { filename: 'song.sloppak' },
+        arrangement: { index: 0, id: 'vocals', name: 'Vocals' },
+        voices: [
+            { id: 'lead', name: 'Lead', tokens: [{ start: 1, duration: 1, text: 'a', midi: 60 }] },
+            { id: 'harm', name: 'Harmony', primary: true, tokens: [{ start: 1, duration: 1, text: 'b', midi: 67 }] },
+        ],
+    });
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas({ width: 960, height: 480 }), bundle());
+    await flush();
+    const ready = bus.of('lyrics_karaoke:renderer-ready')[0].detail;
+    assert.strictEqual(ready.voiceId, 'harm', 'scores the explicit primary');
+    assert.strictEqual(ready.voices, 2);
+    r.destroy();
+});
+
+// ── The shared syllable-marker helper (one impl, two token shapes) ──────
+
+test('stripSyllableMarker strips a single trailing layout marker', () => {
+    const s = screen.stripSyllableMarker;
+    assert.strictEqual(s('hel-'), 'hel');
+    assert.strictEqual(s('lo+'), 'lo');
+    assert.strictEqual(s('plain'), 'plain');
+    assert.strictEqual(s(''), '');
+    assert.strictEqual(s(null), '');
+    assert.strictEqual(s(undefined), '');
+    // Only ONE marker is ever stripped — a hyphen inside a word survives.
+    assert.strictEqual(s('well-known'), 'well-known');
+    assert.strictEqual(s('a--'), 'a-');
 });
