@@ -19,7 +19,7 @@ Endpoints
 * ``GET  /status?filename=…``     — per-song readiness flags
 * ``GET  /server-status``         — alignment server reachable?
 * ``GET  /data?filename=…``       — merged ``[{t, d, w, midi?}]`` for the player overlay
-* ``GET  /playback?filename=…``   — canonical versioned multi-voice payload (see below)
+* ``GET  /playback?filename=…[&arrangement=N]`` — canonical versioned multi-voice payload (see below)
 * ``POST /align``                 — run Whisper alignment, return segments
 * ``POST /save-lyrics``           — persist alignment segments as ``lyrics.json``
 * ``POST /generate-pitch``        — extract per-syllable pitch and persist ``vocal_pitch.json``
@@ -297,7 +297,47 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     return tokens
 
 
-def _build_playback_payload(filename: str, source_dir: Path, manifest: dict) -> dict:
+def _arrangement_identity(manifest: dict, index: int | None) -> dict:
+    """Resolve a requested arrangement index to a stable identity.
+
+    The renderer knows which arrangement it was mounted for (core hands it
+    ``songInfo.arrangement_index``) but not the pack's own ids, so echo the
+    index back alongside the manifest's ``id``/``name`` for that entry —
+    that is what makes a cached payload attributable to one arrangement
+    rather than to a filename alone.
+
+    ``index=None`` means the caller didn't say (every pre-existing caller,
+    and the reason the field was a bare ``None`` placeholder before). An
+    index that doesn't resolve against ``arrangements[]`` — out of range,
+    or a malformed manifest entry — echoes the index with a null identity
+    rather than inventing one or failing the request: the lyrics are
+    song-level, so the tokens are still correct and still worth serving.
+    """
+    ident: dict = {"index": index, "id": None, "name": None}
+    if index is None:
+        return ident
+    arrangements = manifest.get("arrangements")
+    if not isinstance(arrangements, list) or not 0 <= index < len(arrangements):
+        return ident
+    entry = arrangements[index]
+    if not isinstance(entry, dict):
+        return ident
+    raw_id = entry.get("id")
+    arr_id = str(raw_id) if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else None
+    raw_name = entry.get("name")
+    name = str(raw_name) if isinstance(raw_name, (str, int)) and not isinstance(raw_name, bool) else None
+    ident["id"] = arr_id
+    # Per feedpak-spec §5.2 `name` defaults to `id` when absent.
+    ident["name"] = name if name is not None else arr_id
+    return ident
+
+
+def _build_playback_payload(
+    filename: str,
+    source_dir: Path,
+    manifest: dict,
+    arrangement_index: int | None = None,
+) -> dict:
     """Assemble the canonical playback payload for one resolved sloppak.
 
     Raises ``PlaybackPayloadError`` for malformed pack content. Returns a
@@ -317,7 +357,7 @@ def _build_playback_payload(filename: str, source_dir: Path, manifest: dict) -> 
     return {
         "schema_version": PLAYBACK_SCHEMA_VERSION,
         "song": {"filename": filename},
-        "arrangement": {"index": None},
+        "arrangement": _arrangement_identity(manifest, arrangement_index),
         "voices": voices,
     }
 
@@ -847,20 +887,31 @@ def setup(app: FastAPI, context: dict):
         return {"filename": filename, "tokens": merged}
 
     @app.get("/api/plugins/lyrics_karaoke/playback")
-    def lk_playback(filename: str = ""):
+    def lk_playback(filename: str = "", arrangement: int | None = None):
         """Canonical multi-voice playback payload (see module docstring).
 
         Superset of ``/data`` shaped for the integrated visualization
         provider: ``{schema_version, song, arrangement, voices: [{id,
         name, primary, tokens: [{start, duration, text, midi?}]}]}``.
         ``/data`` is unaffected and keeps serving its existing shape.
+
+        ``arrangement`` is the OPTIONAL zero-based index the caller is
+        mounted for (core hands the renderer ``songInfo.arrangement_index``);
+        it only labels the response — lyrics are song-level in feedpak v1, so
+        the tokens are identical whatever is passed, and omitting it is the
+        pre-existing behaviour. A negative index is rejected outright rather
+        than echoed, since no arrangement list can ever satisfy it.
         """
+        if arrangement is not None and arrangement < 0:
+            return JSONResponse({"error": "Invalid arrangement index"}, 422)
         resolved = _resolve_sloppak(filename)
         if resolved is None:
             return JSONResponse({"error": "Not a sloppak"}, 404)
         source_dir, manifest, _dlc_path, _is_zip = resolved
         try:
-            payload = _build_playback_payload(filename, source_dir, manifest)
+            payload = _build_playback_payload(
+                filename, source_dir, manifest, arrangement_index=arrangement
+            )
         except PlaybackPayloadError as exc:
             return JSONResponse({"error": exc.message}, exc.status)
         if not payload["voices"]:
