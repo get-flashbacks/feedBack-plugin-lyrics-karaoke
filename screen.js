@@ -1753,6 +1753,19 @@
         // and hydrate the setup screen when entering it. Keep the
         // wrapper minimal so we play nice with other plugins that also
         // hook showScreen (load order isn't deterministic).
+        // Core navigates via its own imported showScreen() (session.js) and
+        // never calls window.showScreen — that global is dead as far as the
+        // real host's ✕/Esc exit and playSong()/navigate() paths are
+        // concerned (feedBack#923/#924; see section_map's CLAUDE.md for the
+        // same lesson). Track _playerScreenActive off the screen:changed
+        // event core actually fires, so a mid-generate exit via those paths
+        // is caught even though the wrapper below is not.
+        const fbBus = window.feedBack || window.slopsmith;
+        if (fbBus && typeof fbBus.on === 'function') {
+            fbBus.on('screen:changed', (e) => {
+                _playerScreenActive = !!(e && e.detail && e.detail.id === 'player');
+            });
+        }
         const origShowScreen = window.showScreen;
         if (typeof origShowScreen === 'function') {
             window.showScreen = function (name) {
