@@ -32,9 +32,18 @@
     let tokenIndexMap = new Map();   // tok → index into pitchData.tokens; rebuilt on each load
     let songPitchRange = null;       // {lo, hi} fixed across the song so bars don't shift vertically as the window scrolls
     let karaokeMode = false;         // user toggle
+    // Tracks whether the player screen is the currently-active screen.
+    // onToggleClick() awaits network calls before flipping karaokeMode on;
+    // if the user navigates away during one of those awaits, the showScreen
+    // cleanup below runs while karaokeMode is still false (so it no-ops),
+    // and the pending continuation would otherwise reactivate the karaoke
+    // player context after the user is already on another screen. Default
+    // true since the plugin only ever runs while the player screen is up.
+    let _playerScreenActive = true;
     let savedShowLyrics = true;      // restore on toggle off
     let generating = false;          // suppress double-clicks during /generate
     let inflightFetch = 0;           // monotonic token; stale fetches drop their result
+    let karaokePreviousContext = null;
 
     // ── DOM refs ───────────────────────────────────────────────────────
     let toggleBtn = null;
@@ -280,6 +289,7 @@
                     if (status && status.has_pitch) {
                         await fetchPitchData(clickFilename);
                         if (currentSong && currentSong.filename !== clickFilename) return;
+                        if (!_playerScreenActive) return;
                         setKaraokeMode(true);
                     }
                 }
@@ -299,8 +309,36 @@
             if (!pitchData) {
                 await fetchPitchData(clickFilename);
                 if (currentSong && currentSong.filename !== clickFilename) return;
+                if (!_playerScreenActive) return;
             }
             setKaraokeMode(!!pitchData);
+        }
+    }
+
+    function updateKaraokePlayerContext(on) {
+        const api = window.feedBack && window.feedBack.playerContexts;
+        if (!api || typeof api.getActive !== 'function' || typeof api.updateActive !== 'function') return;
+        const active = api.getActive('main');
+        if (!active) return;
+        if (on) {
+            karaokePreviousContext = active;
+            api.updateActive('main', {
+                role: 'karaoke',
+                instrument: 'voice',
+                skill: 'vocal-pitch',
+            });
+        } else if (karaokePreviousContext) {
+            // A new song may already have replaced main while this plugin handles
+            // its song-loaded event. Never restore the previous song over it.
+            if (active.song_id === karaokePreviousContext.song_id) {
+                api.updateActive('main', {
+                    arrangement_id: karaokePreviousContext.arrangement_id,
+                    role: karaokePreviousContext.role,
+                    instrument: karaokePreviousContext.instrument,
+                    skill: karaokePreviousContext.skill,
+                });
+            }
+            karaokePreviousContext = null;
         }
     }
 
@@ -310,6 +348,7 @@
             return;
         }
         karaokeMode = on;
+        updateKaraokePlayerContext(on);
         if (on) {
             // Stash the current text-lyrics visibility so we can restore
             // it when the user toggles back. Don't blow away their pref.
@@ -1138,6 +1177,7 @@
                 window.highway.setLyricsVisible(savedShowLyrics);
             }
             karaokeMode = false;
+            updateKaraokePlayerContext(false);
         }
         currentSong = song || null;
         status = null;
@@ -1713,10 +1753,29 @@
         // and hydrate the setup screen when entering it. Keep the
         // wrapper minimal so we play nice with other plugins that also
         // hook showScreen (load order isn't deterministic).
+        // Core navigates via its own imported showScreen() (session.js) and
+        // never calls window.showScreen — that global is dead as far as the
+        // real host's ✕/Esc exit and playSong()/navigate() paths are
+        // concerned (feedBack#923/#924; see section_map's CLAUDE.md for the
+        // same lesson). Track _playerScreenActive off screen:changing, not
+        // screen:changed: session.js emits screen:changing synchronously at
+        // the very top of showScreen ("I am leaving `from`, cancel/teardown
+        // here"), while screen:changed only fires at the end, after
+        // teardown awaits (e.g. desktop/JUCE's jucePlayer.stop() on exit,
+        // or loadLibraryProviders() when navigating home) — late enough
+        // that a generate-fetch resolving during that tail would still see
+        // the flag true and reactivate karaoke after the user already left.
+        const fbBus = window.feedBack || window.slopsmith;
+        if (fbBus && typeof fbBus.on === 'function') {
+            fbBus.on('screen:changing', (e) => {
+                _playerScreenActive = !!(e && e.detail && e.detail.id === 'player');
+            });
+        }
         const origShowScreen = window.showScreen;
         if (typeof origShowScreen === 'function') {
             window.showScreen = function (name) {
                 const ret = origShowScreen.apply(this, arguments);
+                _playerScreenActive = name === 'player';
                 if (name !== 'player') {
                     if (karaokeMode) setKaraokeMode(false);
                     teardownOverlay();
