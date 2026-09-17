@@ -35,6 +35,7 @@
     let savedShowLyrics = true;      // restore on toggle off
     let generating = false;          // suppress double-clicks during /generate
     let inflightFetch = 0;           // monotonic token; stale fetches drop their result
+    let karaokePreviousContext = null;
 
     // ── DOM refs ───────────────────────────────────────────────────────
     let toggleBtn = null;
@@ -304,12 +305,40 @@
         }
     }
 
+    function updateKaraokePlayerContext(on) {
+        const api = window.feedBack && window.feedBack.playerContexts;
+        if (!api || typeof api.getActive !== 'function' || typeof api.updateActive !== 'function') return;
+        const active = api.getActive('main');
+        if (!active) return;
+        if (on) {
+            karaokePreviousContext = active;
+            api.updateActive('main', {
+                role: 'karaoke',
+                instrument: 'voice',
+                skill: 'vocal-pitch',
+            });
+        } else if (karaokePreviousContext) {
+            // A new song may already have replaced main while this plugin handles
+            // its song-loaded event. Never restore the previous song over it.
+            if (active.song_id === karaokePreviousContext.song_id) {
+                api.updateActive('main', {
+                    arrangement_id: karaokePreviousContext.arrangement_id,
+                    role: karaokePreviousContext.role,
+                    instrument: karaokePreviousContext.instrument,
+                    skill: karaokePreviousContext.skill,
+                });
+            }
+            karaokePreviousContext = null;
+        }
+    }
+
     function setKaraokeMode(on) {
         if (on === karaokeMode) {
             refreshButtonState();
             return;
         }
         karaokeMode = on;
+        updateKaraokePlayerContext(on);
         if (on) {
             // Stash the current text-lyrics visibility so we can restore
             // it when the user toggles back. Don't blow away their pref.
@@ -1138,6 +1167,7 @@
                 window.highway.setLyricsVisible(savedShowLyrics);
             }
             karaokeMode = false;
+            updateKaraokePlayerContext(false);
         }
         currentSong = song || null;
         status = null;

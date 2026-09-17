@@ -2,7 +2,17 @@
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
   "version": "1.5.0",
-  "standards": ["plugin-runtime-idempotent.v1"],
+  "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"],
+  "capabilities": {
+    "player-identity": {
+      "roles": ["contributor"],
+      "emits": ["changed"],
+      "mode": "active",
+      "compatibility": "none",
+      "safety": "safe",
+      "description": "Scopes karaoke and vocal-pitch practice to the active player's voice role."
+    }
+  },
   "private": false,
   "nav": {
     "label": "Lyrics Karaoke",
