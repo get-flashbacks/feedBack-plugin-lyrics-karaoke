@@ -341,10 +341,22 @@ behavior for pitch-less songs.
   renderer for a Vocals arrangement on a host meeting the minimum version;
   the overlay is the fallback everywhere else.
 
-- **The handshake, as shipped in #14.** Ownership is claimed on the 0→1
-  live-instance transition and released on 1→0, so a second splitscreen
-  panel joining an owned session stands nothing else down and the last
-  panel out restores everything:
+- **The handshake, as shipped in #14, and the reverse direction closed in
+  review.** Ownership is claimed on the 0→1 live-instance transition and
+  released on 1→0, so a second splitscreen panel joining an owned session
+  stands nothing else down and the last panel out restores everything.
+  Claiming ownership was covered from the start; re-*enabling* the legacy
+  overlay while a viz instance still owned playback was not — nothing
+  stopped a user from clicking the Karaoke button afterward, which would
+  flip `karaokeMode` true and could auto-start the mic even though the
+  overlay itself would still no-op, leaving a real path to a second
+  `getUserMedia()` and the legacy scorer running concurrently with the
+  provider. `setKaraokeMode(true)` — the single function that both mounts
+  the overlay and auto-starts the mic — now refuses while
+  `_vizOwnsPlayback()` is true, closing every downstream path (including
+  the mic button's own eligibility, which already required `karaokeMode`)
+  at the one place ownership is actually granted, rather than patching
+  each symptom separately.
   - *Legacy overlay* — `setKaraokeMode(false)` (which already stops the
     mic, resets results and restores the highway's own lyrics) when karaoke
     was on, remembering that we did so; otherwise just `teardownOverlay()`.
