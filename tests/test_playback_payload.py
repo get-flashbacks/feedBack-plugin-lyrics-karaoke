@@ -168,7 +168,10 @@ def test_build_playback_payload_shape_with_tokens(tmp_path):
 
     assert payload["schema_version"] == routes.PLAYBACK_SCHEMA_VERSION
     assert payload["song"] == {"filename": "song.sloppak"}
-    assert payload["arrangement"] == {"index": None}
+    # `id`/`name` joined `index` when the route learned to label a payload
+    # with the arrangement it was requested for; an unlabelled payload (no
+    # index passed) keeps all three null.
+    assert payload["arrangement"] == {"index": None, "id": None, "name": None}
     assert len(payload["voices"]) == 1
     voice = payload["voices"][0]
     assert voice["id"] == "primary"
@@ -254,3 +257,116 @@ def test_playback_route_200_with_payload(tmp_path, monkeypatch):
 
     assert payload["schema_version"] == routes.PLAYBACK_SCHEMA_VERSION
     assert payload["voices"][0]["tokens"] == [{"start": 0.0, "duration": 0.5, "text": "hi"}]
+
+
+# ── _arrangement_identity (#13: "arrangement identity") ─────────────────────
+
+_ARRS = [
+    {"id": "lead", "name": "Lead", "file": "arrangements/lead.json"},
+    {"id": "vocals", "name": "Vocals", "file": "arrangements/vocals.json"},
+]
+
+
+def test_arrangement_identity_none_index_is_unlabelled():
+    assert routes._arrangement_identity({"arrangements": _ARRS}, None) == {
+        "index": None, "id": None, "name": None,
+    }
+
+
+def test_arrangement_identity_resolves_index_to_id_and_name():
+    assert routes._arrangement_identity({"arrangements": _ARRS}, 1) == {
+        "index": 1, "id": "vocals", "name": "Vocals",
+    }
+
+
+def test_arrangement_identity_name_defaults_to_id_per_spec():
+    # feedpak-spec §5.2: `name` defaults to `id` when absent.
+    manifest = {"arrangements": [{"id": "lead", "file": "a.json"}]}
+    assert routes._arrangement_identity(manifest, 0) == {
+        "index": 0, "id": "lead", "name": "lead",
+    }
+
+
+def test_arrangement_identity_out_of_range_echoes_index_only():
+    assert routes._arrangement_identity({"arrangements": _ARRS}, 7) == {
+        "index": 7, "id": None, "name": None,
+    }
+
+
+@pytest.mark.parametrize("manifest", [
+    {},                                  # no arrangements key at all
+    {"arrangements": "not-a-list"},      # malformed type
+    {"arrangements": ["not-a-dict"]},    # malformed entry
+    {"arrangements": [{"name": "No id"}]},  # entry without an id
+])
+def test_arrangement_identity_tolerates_malformed_manifests(manifest):
+    ident = routes._arrangement_identity(manifest, 0)
+    assert ident["index"] == 0
+    assert ident["id"] is None
+
+
+def test_arrangement_identity_rejects_bool_index_shaped_values():
+    # `True` is an int subclass in Python; an id of `True` must not stringify
+    # into "True" and masquerade as a real arrangement id.
+    manifest = {"arrangements": [{"id": True, "name": False}]}
+    assert routes._arrangement_identity(manifest, 0) == {
+        "index": 0, "id": None, "name": None,
+    }
+
+
+def test_build_playback_payload_carries_arrangement_identity(tmp_path):
+    (tmp_path / "lyrics.json").write_text(
+        json.dumps([{"t": 0.0, "d": 0.5, "w": "hi"}]), encoding="utf-8",
+    )
+    manifest = {"lyrics": "lyrics.json", "arrangements": _ARRS}
+
+    payload = routes._build_playback_payload(
+        "song.sloppak", tmp_path, manifest, arrangement_index=1,
+    )
+
+    assert payload["arrangement"] == {"index": 1, "id": "vocals", "name": "Vocals"}
+
+
+def test_build_playback_payload_arrangement_defaults_to_unlabelled(tmp_path):
+    # Pre-existing callers pass no index; the field stays null-shaped.
+    (tmp_path / "lyrics.json").write_text(
+        json.dumps([{"t": 0.0, "d": 0.5, "w": "hi"}]), encoding="utf-8",
+    )
+    payload = routes._build_playback_payload(
+        "song.sloppak", tmp_path, {"lyrics": "lyrics.json", "arrangements": _ARRS},
+    )
+    assert payload["arrangement"]["index"] is None
+
+
+def test_build_playback_payload_tokens_ignore_arrangement_index(tmp_path):
+    # Lyrics are song-level in feedpak v1 — the index labels the response,
+    # it must not change the token set.
+    (tmp_path / "lyrics.json").write_text(
+        json.dumps([{"t": 1.0, "d": 0.5, "w": "a"}]), encoding="utf-8",
+    )
+    manifest = {"lyrics": "lyrics.json", "arrangements": _ARRS}
+    a = routes._build_playback_payload("s.sloppak", tmp_path, manifest, arrangement_index=0)
+    b = routes._build_playback_payload("s.sloppak", tmp_path, manifest, arrangement_index=1)
+    assert a["voices"] == b["voices"]
+
+
+def test_playback_route_passes_arrangement_through(tmp_path, monkeypatch):
+    (tmp_path / "lyrics.json").write_text(
+        json.dumps([{"t": 0.0, "d": 0.5, "w": "hi"}]), encoding="utf-8",
+    )
+    manifest = {"lyrics": "lyrics.json", "arrangements": _ARRS}
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: (tmp_path, manifest, tmp_path, False))
+
+    payload = endpoint(filename="song.sloppak", arrangement=1)
+
+    assert payload["arrangement"] == {"index": 1, "id": "vocals", "name": "Vocals"}
+
+
+def test_playback_route_422_on_negative_arrangement(tmp_path, monkeypatch):
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: (tmp_path, {}, tmp_path, False))
+
+    response = endpoint(filename="song.sloppak", arrangement=-1)
+
+    assert response.status_code == 422

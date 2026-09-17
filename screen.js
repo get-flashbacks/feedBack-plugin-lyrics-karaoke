@@ -385,6 +385,11 @@
     // ── Overlay canvas lifecycle ───────────────────────────────────────
 
     function showOverlay() {
+        // Exactly one owner of playback at a time (#10). While a
+        // visualization-provider instance is live it renders the ribbon
+        // itself, so the overlay must not also mount a canvas and run a
+        // second rAF loop over the same song.
+        if (_vizOwnsPlayback()) return;
         const player = document.getElementById('player');
         const highway = document.getElementById('highway');
         if (!player || !highway) return;
@@ -1793,6 +1798,537 @@
         }
     }
 
+    // ── Visualization provider (#14) ────────────────────────────────────
+    //
+    // Registers this plugin as a first-class FeedBack visualization
+    // provider (core's setRenderer contract), consuming the canonical
+    // `/playback` payload (#13) instead of re-deriving lyrics/pitch the
+    // way the legacy overlay above does. Boundaries, the minimum host
+    // version, and the settings namespace are fixed by
+    // docs/architecture/vocals-visualization-integration.md (#10).
+    //
+    // Scope note: this is the REGISTRATION + LIFECYCLE half. The ribbon
+    // drawn below is deliberately the overlay's own visual language, so a
+    // selected panel renders something correct today; porting Karaoke
+    // Highway's visual experience (Taynavv/feedback-vocals-viz) onto it is
+    // #15's job and replaces `_vizDrawFrame` wholesale.
+
+    const VIZ_PLUGIN_ID = 'lyrics_karaoke';
+
+    // Per-instance settings. Mirrors the manifest's
+    // capabilities.visualization.settings block — the HOST owns
+    // persistence (feedBack#849), we only hold the live value and the
+    // declared default. Defaults come from #10's "Microphone and settings
+    // ownership": the legacy overlay only ever persisted `micFeedback`, so
+    // the other three start at Karaoke Highway's safe defaults rather than
+    // migrating settings that never existed.
+    const VIZ_SETTING_DEFAULTS = Object.freeze({
+        micFeedback: true,
+        tolerance: 1,
+        octaveIndependent: false,
+        micOffsetMs: 0,
+    });
+
+    // Live renderer instances, for ONE purpose: deciding whether the
+    // provider currently owns playback (see `_vizOwnsPlayback`). Every
+    // piece of actual renderer state is panel-local, held in
+    // `_createVizRenderer`'s closure — a shared module global would make
+    // two splitscreen panels overwrite each other.
+    const _vizInstances = new Set();
+
+    // Set when a provider instance turned the legacy overlay off, so the
+    // last instance to be destroyed can hand playback back rather than
+    // leaving the user's toggle stuck off.
+    let _vizSuppressedKaraoke = false;
+
+    function _vizOwnsPlayback() {
+        return _vizInstances.size > 0;
+    }
+
+    // Whether note_detect's default singleton was running when we took
+    // playback over, so the last instance out can hand it back.
+    let _vizRestoreNoteDetect = false;
+
+    /** Stand note_detect's default singleton down while the provider owns
+     *  playback. note_detect ships the handshake for exactly this
+     *  (`createNoteDetector.setDefaultSuppressed`, which also silently tears
+     *  down a running session — silent so no end-of-song summary modal pops)
+     *  and documents that the taking-over host captures `wantsDetect()` /
+     *  `isEnabled()` first if it wants to restore later.
+     *
+     *  Without this, a karaoke panel and note_detect would both hold a
+     *  microphone and both score, and note_detect's HUD would draw over the
+     *  ribbon — the "no competing scorers" rule in
+     *  docs/architecture/vocals-visualization-integration.md is a rule about
+     *  the whole app, not just about this plugin's own legacy overlay.
+     *
+     *  Entirely feature-detected: no note_detect installed → no-op. */
+    function _vizSuppressNoteDetect() {
+        const factory = window.createNoteDetector;
+        if (!factory || typeof factory.setDefaultSuppressed !== 'function') return;
+        const singleton = window.noteDetect;
+        _vizRestoreNoteDetect = !!(singleton
+            && typeof singleton.wantsDetect === 'function'
+            && singleton.wantsDetect());
+        try {
+            factory.setDefaultSuppressed(true);
+        } catch (_) { /* never let a peer plugin break renderer init */ }
+    }
+
+    function _vizRestoreNoteDetectOwnership() {
+        const factory = window.createNoteDetector;
+        if (!factory || typeof factory.setDefaultSuppressed !== 'function') return;
+        try {
+            factory.setDefaultSuppressed(false);
+        } catch (_) { /* noop */ }
+        // Suppression only blocks future auto-enables, so a singleton the
+        // user had ON has to be re-armed explicitly. Fire-and-forget:
+        // enable() is async and its result isn't ours to wait on.
+        if (_vizRestoreNoteDetect) {
+            _vizRestoreNoteDetect = false;
+            const singleton = window.noteDetect;
+            if (singleton && typeof singleton.enable === 'function') {
+                try { Promise.resolve(singleton.enable()).catch(() => {}); } catch (_) { /* noop */ }
+            }
+        }
+    }
+
+    /** Claim sole ownership of playback. Only acts on the 0 -> 1 instance
+     *  transition: a second splitscreen panel joining an already-owned
+     *  session has nothing left to stand down. */
+    function _vizClaimPlaybackOwnership() {
+        if (_vizInstances.size !== 1) return;
+        if (karaokeMode) {
+            _vizSuppressedKaraoke = true;
+            setKaraokeMode(false);
+        } else {
+            teardownOverlay();
+        }
+        _vizSuppressNoteDetect();
+    }
+
+    /** Hand playback back once the LAST instance is gone. */
+    function _vizReleasePlaybackOwnership() {
+        if (_vizOwnsPlayback()) return;
+        _vizRestoreNoteDetectOwnership();
+        if (_vizSuppressedKaraoke) {
+            _vizSuppressedKaraoke = false;
+            if (_playerScreenActive) setKaraokeMode(true);
+        }
+    }
+
+    /** Auto-mode predicate. Declared as a static on the factory (not the
+     *  instance) so core can evaluate it without constructing a throwaway
+     *  renderer. Kept deliberately narrow — core takes the FIRST matching
+     *  factory in picker order, so a loose predicate steals songs from
+     *  more specialized viz. */
+    function _vizMatchesArrangement(songInfo) {
+        const name = (songInfo && songInfo.arrangement) || '';
+        return /vocal/i.test(String(name));
+    }
+
+    /** Identity of the (song, arrangement) pair a payload was loaded for.
+     *  Used to notice a song switch or an in-place arrangement change
+     *  without re-fetching on every frame. */
+    function _vizSongKey(songInfo) {
+        if (!songInfo || !songInfo.filename) return null;
+        const idx = Number.isInteger(songInfo.arrangement_index)
+            ? songInfo.arrangement_index
+            : null;
+        return `${songInfo.filename}#${idx === null ? '' : idx}`;
+    }
+
+    /** Pick the voice to render from a `/playback` payload. Prefers the
+     *  `primary` voice; falls back to the first one. Multi-voice packs are
+     *  blocked on a feedpak-spec FEP (see #10 / #16), so today this is
+     *  always the single `primary` entry — but reading the list properly
+     *  now means #16 only has to add panel-to-voice assignment. */
+    function _vizPickVoice(payload) {
+        const voices = (payload && Array.isArray(payload.voices)) ? payload.voices : [];
+        if (!voices.length) return null;
+        for (const v of voices) {
+            if (v && v.primary) return v;
+        }
+        return voices[0] || null;
+    }
+
+    /** Normalize a voice's tokens into the shape `_vizDrawFrame` wants.
+     *  The route already sorts and sanitizes (#13), so this only drops
+     *  anything structurally unusable and coerces `midi` to a number or
+     *  null — it must never re-implement the token contract. */
+    function _vizNormalizeTokens(voice) {
+        const raw = (voice && Array.isArray(voice.tokens)) ? voice.tokens : [];
+        const out = [];
+        for (const tok of raw) {
+            if (!tok || typeof tok.start !== 'number' || !isFinite(tok.start)) continue;
+            const dur = (typeof tok.duration === 'number' && isFinite(tok.duration) && tok.duration >= 0)
+                ? tok.duration
+                : 0;
+            out.push({
+                start: tok.start,
+                duration: dur,
+                text: typeof tok.text === 'string' ? tok.text : '',
+                midi: (typeof tok.midi === 'number' && isFinite(tok.midi)) ? tok.midi : null,
+            });
+        }
+        return out;
+    }
+
+    /** Song-wide pitch window, computed ONCE per load so bars don't drift
+     *  vertically as the visible window scrolls. Mirrors
+     *  `computeSongPitchRange` but reads the canonical token shape. */
+    function _vizPitchRange(tokens) {
+        const midis = [];
+        for (const tok of tokens) {
+            if (tok.midi !== null) midis.push(tok.midi);
+        }
+        if (!midis.length) return null;   // lyrics-only: flat ribbon (#10)
+        midis.sort((a, b) => a - b);
+        const pct = (p) => midis[Math.min(midis.length - 1, Math.max(0, Math.floor(p * (midis.length - 1))))];
+        let lo = pct(0.05);
+        let hi = pct(0.95);
+        if (hi - lo < MIN_PITCH_SPAN_SEMITONES) {
+            const center = (hi + lo) / 2;
+            const half = MIN_PITCH_SPAN_SEMITONES / 2;
+            lo = center - half;
+            hi = center + half;
+        }
+        return { lo, hi };
+    }
+
+    /** Lower bound on `start` over a start-sorted token array — the index
+     *  of the first token with `start >= t`. Core exposes `bundle.lowerBoundT`
+     *  for its own `.t`-keyed chart arrays; the canonical payload keys on
+     *  `.start`, so the provider carries its own. Used to cull to the
+     *  visible window instead of full-scanning the song every frame (see
+     *  feedBack's CLAUDE.md performance rules). */
+    function _vizLowerBound(tokens, t) {
+        let lo = 0;
+        let hi = tokens.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (tokens[mid].start < t) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    /** Longest token duration in the song, computed ONCE per load. The
+     *  draw loop needs it as a lookbehind so a held note that started
+     *  before the visible window still gets drawn. */
+    function _vizMaxDuration(tokens) {
+        let max = 0;
+        for (const tok of tokens) {
+            if (tok.duration > max) max = tok.duration;
+        }
+        return max;
+    }
+
+    function _vizEmit(name, detail) {
+        const bus = window.feedBack || window.slopsmith;
+        if (!bus || typeof bus.emit !== 'function') return;
+        try {
+            bus.emit(name, Object.assign({ pluginId: VIZ_PLUGIN_ID }, detail));
+        } catch (_) { /* a listener throwing must not break the renderer */ }
+    }
+
+    /** Placeholder visual — #15 replaces this with the ported Karaoke
+     *  Highway renderer. Pure function of its arguments so it stays
+     *  panel-local and unit-testable, and does NO DOM work: it runs on
+     *  core's per-frame path (see the performance rules in feedBack's
+     *  CLAUDE.md). */
+    function _vizDrawFrame(ctx2d, W, H, tokens, now, range, maxDuration) {
+        ctx2d.clearRect(0, 0, W, H);
+        ctx2d.fillStyle = RIBBON_BG;
+        ctx2d.fillRect(0, 0, W, H);
+
+        const winLeft = now - PLAYHEAD_FRAC * VISIBLE_SECONDS;
+        const winRight = now + (1 - PLAYHEAD_FRAC) * VISIBLE_SECONDS;
+        const span = winRight - winLeft;
+        const xOf = (t) => ((t - winLeft) / span) * W;
+
+        const lo = range ? range.lo : 60;
+        const hi = range ? range.hi : 60 + MIN_PITCH_SPAN_SEMITONES;
+        const yOf = (midi) => H - ((midi - lo) / Math.max(1, hi - lo)) * (H * 0.7) - H * 0.15;
+
+        // Windowed iteration: cull to the visible span rather than walking
+        // the whole song every frame. Sustains can start before the window,
+        // so back the cursor up by the longest token seen so far — a fixed
+        // lookbehind would silently drop a long held note whose `start` sits
+        // further back than the guess.
+        const lookbehind = (typeof maxDuration === 'number' && maxDuration > 0) ? maxDuration : 0;
+        let i = _vizLowerBound(tokens, winLeft - lookbehind - 0.5);
+        for (; i < tokens.length; i++) {
+            const tok = tokens[i];
+            // Sorted by `start`, so nothing past the right edge can match.
+            if (tok.start > winRight + 0.5) break;
+            const t1 = tok.start + tok.duration;
+            if (t1 < winLeft - 0.5) continue;
+            const x0 = xOf(tok.start);
+            const x1 = Math.max(x0 + 2, xOf(t1));
+            const active = now >= tok.start && now <= t1;
+            if (tok.midi !== null) {
+                const y = yOf(tok.midi);
+                ctx2d.fillStyle = active ? BAR_COLOR_ACTIVE
+                    : (now > t1 ? BAR_COLOR_FILL : BAR_COLOR_DIM);
+                ctx2d.fillRect(x0, y - BAR_PAD_PX, x1 - x0, Math.max(3, H * 0.04));
+            }
+            if (tok.text) {
+                ctx2d.fillStyle = now > t1 ? TEXT_COLOR_PAST : TEXT_COLOR;
+                ctx2d.fillText(tok.text, x0, H - 6);
+            }
+        }
+
+        ctx2d.fillStyle = PLAYHEAD_COLOR;
+        ctx2d.fillRect(Math.round(W * PLAYHEAD_FRAC), 0, 2, H);
+    }
+
+    /** One renderer instance. A FRESH object per factory call — splitscreen
+     *  mounts one per panel and each must be independent (core's
+     *  setRenderer contract). Every mutable field lives in this closure. */
+    function _createVizRenderer() {
+        let ctx2d = null;
+        let initialized = false;
+        let destroyed = false;
+        let tokens = [];
+        let range = null;
+        let maxDuration = 0;
+        let loadedKey = null;      // key we have data for
+        let requestedKey = null;   // key a load is in flight for
+        // Key whose load already failed. Without this, `draw` — which
+        // notices "no data for this song yet" every frame — would re-fire
+        // the fetch 60x/s for the whole time a user sits on a song with no
+        // lyrics (a 404 is the NORMAL state for an unprepared song, not an
+        // exception). One attempt per key per init: a transient failure is
+        // retried when the renderer is re-init'd (song switch, panel
+        // re-mount, re-selecting the viz), not by spinning.
+        let failedKey = null;
+        let loadSeq = 0;           // monotonic; stale responses drop themselves
+        let abortCtl = null;
+        const settings = Object.assign({}, VIZ_SETTING_DEFAULTS);
+
+        function abortInflight() {
+            if (abortCtl) {
+                try { abortCtl.abort(); } catch (_) { /* noop */ }
+                abortCtl = null;
+            }
+            requestedKey = null;
+        }
+
+        function clearData() {
+            tokens = [];
+            range = null;
+            maxDuration = 0;
+            loadedKey = null;
+        }
+
+        function resetLoadState() {
+            clearData();
+            failedKey = null;
+        }
+
+        /** Fire-and-forget load. Deliberately NOT awaited by `draw` — a
+         *  per-frame path must never block on a fetch, and a continuation
+         *  that resolves after a song switch (or after destroy) has to drop
+         *  its own result rather than paint stale data. Both are handled by
+         *  the `loadSeq` token plus the `destroyed` check. */
+        function load(songInfo) {
+            const key = _vizSongKey(songInfo);
+            if (!key) return;
+            if (key === loadedKey || key === requestedKey || key === failedKey) return;
+            abortInflight();
+            const seq = ++loadSeq;
+            requestedKey = key;
+            const filename = songInfo.filename;
+            const arrIndex = Number.isInteger(songInfo.arrangement_index)
+                ? songInfo.arrangement_index
+                : null;
+            let url = `/api/plugins/${VIZ_PLUGIN_ID}/playback?filename=${encodeURIComponent(filename)}`;
+            if (arrIndex !== null) url += `&arrangement=${arrIndex}`;
+            abortCtl = (typeof AbortController === 'function') ? new AbortController() : null;
+            const opts = abortCtl ? { signal: abortCtl.signal } : undefined;
+
+            safeFetch(url, opts).then((res) => {
+                if (destroyed || seq !== loadSeq) return;
+                abortCtl = null;
+                requestedKey = null;
+                if (!res.ok) {
+                    clearData();
+                    failedKey = key;
+                    _vizEmit('lyrics_karaoke:renderer-failed', {
+                        reason: 'playback-unavailable',
+                        filename,
+                        arrangementIndex: arrIndex,
+                        status: res.status,
+                        message: (res.body && res.body.error) || `HTTP ${res.status}`,
+                    });
+                    return;
+                }
+                const voice = _vizPickVoice(res.body);
+                tokens = _vizNormalizeTokens(voice);
+                range = _vizPitchRange(tokens);
+                maxDuration = _vizMaxDuration(tokens);
+                loadedKey = key;
+                _vizEmit('lyrics_karaoke:renderer-ready', {
+                    filename,
+                    arrangementIndex: arrIndex,
+                    schemaVersion: (res.body && res.body.schema_version) || null,
+                    voiceId: (voice && voice.id) || null,
+                    voices: (res.body && Array.isArray(res.body.voices)) ? res.body.voices.length : 0,
+                    tokens: tokens.length,
+                    pitched: range !== null,
+                });
+            }).catch((err) => {
+                if (destroyed || seq !== loadSeq) return;
+                abortCtl = null;
+                requestedKey = null;
+                // An abort is our own teardown/song-switch, not a failure.
+                if (err && err.name === 'AbortError') return;
+                clearData();
+                failedKey = key;
+                _vizEmit('lyrics_karaoke:renderer-failed', {
+                    reason: 'playback-fetch-error',
+                    filename,
+                    arrangementIndex: arrIndex,
+                    message: (err && err.message) || String(err),
+                });
+            });
+        }
+
+        return {
+            // Read by core BEFORE init() so it can swap the underlying
+            // <canvas> when the previous renderer held a different type.
+            contextType: '2d',
+
+            init(canvas, bundle) {
+                // Defensive: core may re-init an instance that was already
+                // destroyed (playSong does stop() -> init() to reuse the
+                // canvas), and a caller could in principle init twice
+                // without an intervening destroy. Start from a clean slate
+                // either way rather than stacking state.
+                if (initialized) this.destroy();
+                destroyed = false;
+                ctx2d = null;
+                resetLoadState();
+
+                if (!canvas || typeof canvas.getContext !== 'function') {
+                    _vizEmit('lyrics_karaoke:renderer-failed', {
+                        reason: 'no-canvas',
+                        message: 'Host provided no usable canvas element; '
+                            + 'falling back to the legacy karaoke overlay.',
+                    });
+                    return;
+                }
+                try {
+                    ctx2d = canvas.getContext('2d');
+                } catch (_) {
+                    // A canvas already locked to another context type
+                    // (webgl2) throws or returns null here.
+                    ctx2d = null;
+                }
+                if (!ctx2d) {
+                    _vizEmit('lyrics_karaoke:renderer-failed', {
+                        reason: 'no-2d-context',
+                        message: 'Could not acquire a 2d context on the highway canvas.',
+                    });
+                    return;
+                }
+
+                initialized = true;
+                _vizInstances.add(this);
+                // Exactly one owner of playback at a time (#10) — covering
+                // both this plugin's legacy overlay AND note_detect's
+                // default singleton.
+                _vizClaimPlaybackOwnership();
+
+                if (bundle && bundle.songInfo) load(bundle.songInfo);
+            },
+
+            draw(bundle) {
+                if (destroyed || !ctx2d || !bundle) return;
+                // Song/arrangement switch: notice it here (core hands the
+                // live songInfo every frame) and kick a non-blocking load.
+                const key = _vizSongKey(bundle.songInfo);
+                if (key && key !== loadedKey) {
+                    if (loadedKey !== null) clearData();
+                    load(bundle.songInfo);
+                }
+                const now = (typeof bundle.currentTime === 'number') ? bundle.currentTime : 0;
+                const W = ctx2d.canvas ? ctx2d.canvas.width : 0;
+                const H = ctx2d.canvas ? ctx2d.canvas.height : 0;
+                if (!W || !H) return;
+                _vizDrawFrame(ctx2d, W, H, tokens, now, range, maxDuration);
+            },
+
+            resize(_w, _h) {
+                // Core has already applied the backing-store dimensions and
+                // `draw` reads them off the canvas each frame, so there is
+                // nothing cached to invalidate. Declared so the contract is
+                // explicit rather than relying on the optional-method path.
+            },
+
+            destroy() {
+                // Flip `destroyed` FIRST: an in-flight fetch continuation or
+                // a stray draw must see a torn-down instance even if the
+                // abort below is unavailable (no AbortController).
+                destroyed = true;
+                initialized = false;
+                abortInflight();
+                loadSeq++;
+                resetLoadState();
+                ctx2d = null;
+                _vizInstances.delete(this);
+                // Last one out hands playback back to whoever we displaced.
+                _vizReleasePlaybackOwnership();
+            },
+
+            // Per-instance settings (feedBack#849). The host renders these
+            // from the manifest and owns persistence; `applySetting` is
+            // REQUIRED of any provider that declares a settings list.
+            applySetting(key, value) {
+                if (!Object.prototype.hasOwnProperty.call(VIZ_SETTING_DEFAULTS, key)) return false;
+                settings[key] = value;
+                return true;
+            },
+
+            getSetting(key) {
+                return Object.prototype.hasOwnProperty.call(settings, key)
+                    ? settings[key]
+                    : undefined;
+            },
+        };
+    }
+
+    /** Publish the factory. Idempotent: the Host may re-execute screen.js
+     *  on plugin reload, and a second registration would hand core a
+     *  factory closing over a different `_vizInstances`, splitting the
+     *  playback-ownership bookkeeping in two.
+     *
+     *  Registration is unconditional by design — that IS the safe
+     *  degradation path for a host below the minimum version (#10:
+     *  0.3.0-alpha.1). An older host simply never reads
+     *  `window.feedBackViz_*`, so the global is inert and the legacy
+     *  overlay keeps owning playback; probing for `setRenderer` here would
+     *  be worse, since `window.highway` need not exist yet at script-load
+     *  time. An instance that is nonetheless handed an unusable canvas
+     *  fails loudly via `renderer-failed` instead of throwing. */
+    function _registerVizProvider() {
+        const KEY = '__feedBackLyricsKaraokeVizRegistered';
+        if (window[KEY]) return false;
+        window[KEY] = true;
+        const factory = function () { return _createVizRenderer(); };
+        factory.matchesArrangement = _vizMatchesArrangement;
+        // Also exposed as a static so core can read it before constructing
+        // a renderer (used by Auto-mode evaluation).
+        factory.contextType = '2d';
+        window.feedBackViz_lyrics_karaoke = factory;
+        // Legacy alias: splitscreen's VIZ_FACTORY_PREFIXES checks
+        // `feedBackViz_` first and falls back to `slopsmithViz_`. Keep both
+        // in sync if this is ever renamed.
+        window.slopsmithViz_lyrics_karaoke = factory;
+        return true;
+    }
+
     // The Host may re-execute screen.js on plugin reload, which re-runs this
     // IIFE and would call init() a second time — adding a second
     // 'song:loaded' subscription (so onSongLoaded fires twice per song) and
@@ -1810,5 +2346,32 @@
         } else {
             init();
         }
+    }
+
+    // Registration only assigns globals — no DOM, no listeners — so it
+    // runs at script evaluation rather than waiting for DOMContentLoaded:
+    // core's viz picker may enumerate `window.feedBackViz_*` before then.
+    // It carries its own idempotency guard, independent of HOOK_KEY.
+    _registerVizProvider();
+
+    // Node-only test hook. Mirrors the piano plugin's pattern: the browser
+    // globals above are the real entry point, and this export exists so the
+    // pure helpers and the renderer factory are reachable from
+    // tests/screen.test.js without a DOM.
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = {
+            VIZ_SETTING_DEFAULTS,
+            _createVizRenderer,
+            _registerVizProvider,
+            _vizMatchesArrangement,
+            _vizSongKey,
+            _vizPickVoice,
+            _vizNormalizeTokens,
+            _vizPitchRange,
+            _vizMaxDuration,
+            _vizLowerBound,
+            _vizOwnsPlayback,
+            _vizDrawFrame,
+        };
     }
 })();
