@@ -1757,12 +1757,17 @@
         // never calls window.showScreen — that global is dead as far as the
         // real host's ✕/Esc exit and playSong()/navigate() paths are
         // concerned (feedBack#923/#924; see section_map's CLAUDE.md for the
-        // same lesson). Track _playerScreenActive off the screen:changed
-        // event core actually fires, so a mid-generate exit via those paths
-        // is caught even though the wrapper below is not.
+        // same lesson). Track _playerScreenActive off screen:changing, not
+        // screen:changed: session.js emits screen:changing synchronously at
+        // the very top of showScreen ("I am leaving `from`, cancel/teardown
+        // here"), while screen:changed only fires at the end, after
+        // teardown awaits (e.g. desktop/JUCE's jucePlayer.stop() on exit,
+        // or loadLibraryProviders() when navigating home) — late enough
+        // that a generate-fetch resolving during that tail would still see
+        // the flag true and reactivate karaoke after the user already left.
         const fbBus = window.feedBack || window.slopsmith;
         if (fbBus && typeof fbBus.on === 'function') {
-            fbBus.on('screen:changed', (e) => {
+            fbBus.on('screen:changing', (e) => {
                 _playerScreenActive = !!(e && e.detail && e.detail.id === 'player');
             });
         }
