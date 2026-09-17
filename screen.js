@@ -261,6 +261,14 @@
             return;
         }
 
+        if (_vizOwnsPlayback()) {
+            toggleBtn.disabled = true;
+            toggleBtn.className = BTN_CLASS_DISABLED;
+            toggleBtn.textContent = 'Karaoke';
+            toggleBtn.title = 'The visualization provider owns playback for this song.';
+            return;
+        }
+
         if (!status.has_pitch) {
             toggleBtn.disabled = false;
             toggleBtn.className = BTN_CLASS_PROMPT;
@@ -366,6 +374,20 @@
     }
 
     function setKaraokeMode(on) {
+        // Exactly one owner of playback at a time (#10) — the OTHER
+        // direction from _vizClaimPlaybackOwnership()'s takeover. That
+        // function turns the legacy overlay off and suppresses note_detect
+        // when a viz-provider instance claims ownership; without a
+        // symmetric check here, nothing stopped the user from re-enabling
+        // karaoke from the button afterward, which would flip karaokeMode
+        // true and (via the `on` branch below) auto-start the mic even
+        // though showOverlay() would still no-op — leaving karaokeMode
+        // true, the mic button eligible, and a real path to acquiring a
+        // second mic stream and running the legacy scorer concurrently
+        // with the viz provider. Refusing here, at the single place that
+        // both mounts the overlay and auto-starts the mic, closes the gap
+        // at its source rather than patching each downstream symptom.
+        if (on && _vizOwnsPlayback()) return;
         if (on === karaokeMode) {
             refreshButtonState();
             return;
@@ -1960,32 +1982,26 @@
         return /vocal/i.test(String(name));
     }
 
+    /** core hands non-integer arrangement_index as `null`/absent for
+     *  arrangement-agnostic content; anything else is coerced to null too
+     *  rather than trusted verbatim. Shared by `_vizSongKey` (song-switch
+     *  detection) and `load()` (the `/playback?arrangement=` query param). */
+    function _vizArrangementIndex(songInfo) {
+        return (songInfo && Number.isInteger(songInfo.arrangement_index))
+            ? songInfo.arrangement_index
+            : null;
+    }
+
     /** Identity of the (song, arrangement) pair a payload was loaded for.
      *  Used to notice a song switch or an in-place arrangement change
      *  without re-fetching on every frame. */
     function _vizSongKey(songInfo) {
         if (!songInfo || !songInfo.filename) return null;
-        const idx = Number.isInteger(songInfo.arrangement_index)
-            ? songInfo.arrangement_index
-            : null;
+        const idx = _vizArrangementIndex(songInfo);
         return `${songInfo.filename}#${idx === null ? '' : idx}`;
     }
 
-    /** Pick the voice to render from a `/playback` payload. Prefers the
-     *  `primary` voice; falls back to the first one. Multi-voice packs are
-     *  blocked on a feedpak-spec FEP (see #10 / #16), so today this is
-     *  always the single `primary` entry — but reading the list properly
-     *  now means #16 only has to add panel-to-voice assignment. */
-    function _vizPickVoice(payload) {
-        const voices = (payload && Array.isArray(payload.voices)) ? payload.voices : [];
-        if (!voices.length) return null;
-        for (const v of voices) {
-            if (v && v.primary) return v;
-        }
-        return voices[0] || null;
-    }
-
-    /** Every voice in a `/playback` payload, normalized, dropping any that
+/** Every voice in a `/playback` payload, normalized, dropping any that
      *  carry no usable tokens. Multi-voice payloads are RENDERED here (the
      *  scored voice as slabs, the rest as guide bars) — but nothing on this
      *  path invents them: `/playback` builds `voices[]` from the singular
@@ -2208,8 +2224,6 @@
     // raw semitone spacing.
     const SEMI_TO_DIA = [0, 0.5, 1, 1.5, 2, 3, 3.5, 4, 4.5, 5, 5.5, 6];
     const NATURAL_PCS = [0, 2, 4, 5, 7, 9, 11];
-    const PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-
     function _vizIsNatural(midi) {
         return NATURAL_PCS.indexOf((((Math.round(midi)) % 12) + 12) % 12) >= 0;
     }
@@ -2219,9 +2233,11 @@
         return Math.floor(r / 12) * 7 + SEMI_TO_DIA[((r % 12) + 12) % 12];
     }
 
+    // Delegates to the legacy overlay's midiToName/_LK_PITCH_NAMES — same
+    // round -> pitch-class -> octave math, one pitch-name table to keep in
+    // sync rather than two.
     function _vizMidiToName(midi) {
-        const r = Math.round(midi);
-        return PITCH_NAMES[((r % 12) + 12) % 12] + (Math.floor(r / 12) - 1);
+        return midiToName(midi);
     }
 
     /** Diatonic range over every pitched token, widened so the wall fills
@@ -2266,16 +2282,11 @@
         return _vizDiatonicRange(all);
     }
 
+    // Delegates to the legacy overlay's roundFillRect — same rounded-rect
+    // fill primitive (roundFillRect also floors the radius at 0, a shade
+    // more defensive than this file's own prior arcTo-based version).
     function _vizRoundRect(ctx2d, x, y, w, h, r) {
-        const rr = Math.min(r, w / 2, h / 2);
-        ctx2d.beginPath();
-        ctx2d.moveTo(x + rr, y);
-        ctx2d.arcTo(x + w, y, x + w, y + h, rr);
-        ctx2d.arcTo(x + w, y + h, x, y + h, rr);
-        ctx2d.arcTo(x, y + h, x, y, rr);
-        ctx2d.arcTo(x, y, x + w, y, rr);
-        ctx2d.closePath();
-        ctx2d.fill();
+        roundFillRect(ctx2d, x, y, w, h, r);
     }
 
     /** The horizon seam where the note wall meets its base. The reference
@@ -2384,12 +2395,30 @@
     /** The lyric band below the seam: the current line plus a dim preview
      *  of the next. The bouncing ball and the silent-lead-in countdown that
      *  ride under these words are #15 phase 2. */
+    // First line index NOT yet finished (plus a 0.3s hold so the last
+    // syllable doesn't vanish the instant it's sung) — i.e. the first
+    // `lines[i].t1 > now - 0.3`. `lines` is sorted by t1 (built sequentially
+    // from time-sorted tokens), so this is a binary search rather than the
+    // linear rescan-from-0 a naive port of the reference would run every
+    // frame for the whole song.
+    function _vizActiveLyricLineIndex(lines, now) {
+        // Same comparison FORM as the linear scan it replaces (`now >=
+        // t1 + 0.3`, not an algebraically-equivalent `now - 0.3 >= t1`) so
+        // this is bit-identical at floating-point boundaries, not merely
+        // equivalent in exact arithmetic.
+        let lo = 0;
+        let hi = lines.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (now >= lines[mid].t1 + 0.3) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
     function _vizDrawLyricBand(ctx2d, tokens, lines, now, railW, W, H, seamY, u) {
         if (!lines || !lines.length) return;
-        let li = 0;
-        // Hold the finished line for a beat before advancing, so the last
-        // syllable doesn't vanish the instant it's sung.
-        while (li < lines.length && now >= lines[li].t1 + 0.3) li++;
+        const li = _vizActiveLyricLineIndex(lines, now);
         if (li >= lines.length) return;
         const cy = seamY + (H - seamY) * 0.20;
         const fontPx = Math.max(16, Math.round(Math.min(36 * u, 44)));
@@ -2566,7 +2595,6 @@
         let tokens = [];          // the SCORED voice's tokens
         let voices = [];          // every voice, for duet guide bars
         let scoredIdx = -1;
-        let range = null;         // flat-ribbon pitch range (null = lyrics-only)
         let stageRange = null;    // diatonic axis, shared across voices
         let lines = null;         // lyric lines, built once per load
         let maxDuration = 0;
@@ -2596,7 +2624,6 @@
             tokens = [];
             voices = [];
             scoredIdx = -1;
-            range = null;
             stageRange = null;
             lines = null;
             maxDuration = 0;
@@ -2621,9 +2648,7 @@
             const seq = ++loadSeq;
             requestedKey = key;
             const filename = songInfo.filename;
-            const arrIndex = Number.isInteger(songInfo.arrangement_index)
-                ? songInfo.arrangement_index
-                : null;
+            const arrIndex = _vizArrangementIndex(songInfo);
             let url = `/api/plugins/${VIZ_PLUGIN_ID}/playback?filename=${encodeURIComponent(filename)}`;
             if (arrIndex !== null) url += `&arrangement=${arrIndex}`;
             abortCtl = (typeof AbortController === 'function') ? new AbortController() : null;
@@ -2648,7 +2673,6 @@
                 voices = _vizNormalizeVoices(res.body);
                 scoredIdx = _vizScoredIndex(voices);
                 tokens = scoredIdx >= 0 ? voices[scoredIdx].tokens : [];
-                range = _vizPitchRange(tokens);
                 // One axis across every voice so a duet's guides share lanes
                 // with the scored voice instead of each being auto-ranged.
                 stageRange = voices.length > 1
@@ -2664,7 +2688,7 @@
                     voiceId: scoredIdx >= 0 ? voices[scoredIdx].id : null,
                     voices: (res.body && Array.isArray(res.body.voices)) ? res.body.voices.length : 0,
                     tokens: tokens.length,
-                    pitched: range !== null,
+                    pitched: stageRange !== null,
                 });
             }).catch((err) => {
                 if (destroyed || seq !== loadSeq) return;
@@ -2760,7 +2784,14 @@
                     }, now);
                     return;
                 }
-                _vizDrawFrame(ctx2d, W, H, tokens, now, range, maxDuration);
+                // _vizDrawFrame's `range` param is null here by construction —
+                // this branch only runs when stageRange is falsy, and for every
+                // voices[] shape /playback can produce today that means the
+                // scored voice has no pitch either (see the comment on
+                // stageRange's computation above). _vizDrawFrame itself keeps
+                // its general range parameter — it's a real, independently
+                // tested contract, just never fed a non-null value from here.
+                _vizDrawFrame(ctx2d, W, H, tokens, now, null, maxDuration);
             },
 
             resize(_w, _h) {
@@ -2868,7 +2899,6 @@
             _registerVizProvider,
             _vizMatchesArrangement,
             _vizSongKey,
-            _vizPickVoice,
             _vizNormalizeVoices,
             _vizScoredIndex,
             _vizNormalizeTokens,
@@ -2878,6 +2908,7 @@
             _vizDiatonicRange,
             _vizSharedDiatonicRange,
             _vizBuildLines,
+            _vizActiveLyricLineIndex,
             _vizDrawStage,
             stripSyllableMarker,
             _vizPitchRange,
@@ -2888,6 +2919,8 @@
             computeSongPitchRange,
             _vizOwnsPlayback,
             _vizDrawFrame,
+            setKaraokeMode,
+            _karaokeModeForTest: () => karaokeMode,
         };
     }
 })();

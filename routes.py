@@ -297,6 +297,19 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     return tokens
 
 
+def _coerce_stringlike(value: object) -> str | None:
+    """``str(value)`` for a value that's genuinely string-or-int-shaped,
+    else ``None``. Excludes ``bool`` — a Python ``bool`` is an ``int``
+    subclass, so without this an id/name of ``True`` would stringify to
+    the literal text "True" and masquerade as a real value.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (str, int)):
+        return str(value)
+    return None
+
+
 def _arrangement_identity(manifest: dict, index: int | None) -> dict:
     """Resolve a requested arrangement index to a stable identity.
 
@@ -322,10 +335,8 @@ def _arrangement_identity(manifest: dict, index: int | None) -> dict:
     entry = arrangements[index]
     if not isinstance(entry, dict):
         return ident
-    raw_id = entry.get("id")
-    arr_id = str(raw_id) if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else None
-    raw_name = entry.get("name")
-    name = str(raw_name) if isinstance(raw_name, (str, int)) and not isinstance(raw_name, bool) else None
+    arr_id = _coerce_stringlike(entry.get("id"))
+    name = _coerce_stringlike(entry.get("name"))
     ident["id"] = arr_id
     # Per feedpak-spec §5.2 `name` defaults to `id` when absent.
     ident["name"] = name if name is not None else arr_id

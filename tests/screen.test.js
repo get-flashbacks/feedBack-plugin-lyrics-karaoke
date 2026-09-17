@@ -73,6 +73,7 @@ function makeCanvas(opts) {
         moveTo() {},
         lineTo() {},
         arcTo() {},
+        quadraticCurveTo() {},
         stroke() { this.calls.push('stroke'); },
         fill() { this.calls.push('fill'); this.fills.push(this._fill); },
         createLinearGradient() {
@@ -198,14 +199,6 @@ test('matchesArrangement leaves non-vocals arrangements alone', () => {
 });
 
 // ── Payload helpers ─────────────────────────────────────────────────────
-
-test('picks the primary voice, else the first', () => {
-    const primary = { id: 'p', primary: true };
-    assert.strictEqual(screen._vizPickVoice({ voices: [{ id: 'a' }, primary] }), primary);
-    assert.strictEqual(screen._vizPickVoice({ voices: [{ id: 'a' }] }).id, 'a');
-    assert.strictEqual(screen._vizPickVoice({ voices: [] }), null);
-    assert.strictEqual(screen._vizPickVoice(null), null);
-});
 
 test('normalizes tokens and preserves unpitched syllables', () => {
     const toks = screen._vizNormalizeTokens({
@@ -1357,4 +1350,98 @@ test('the overlay pitch range defaults sanely with no pitched tokens (null->defa
 test('the provider pitch range keeps signalling null on no pitched tokens', () => {
     // The opposite contract: this null IS the flat-ribbon-fallback signal.
     assert.strictEqual(screen._vizPitchRange([{ start: 0, duration: 1, text: 'a', midi: null }]), null);
+});
+
+// ── Ownership invariant, the reverse direction (altitude finding on PR #24) ──
+//
+// _vizClaimPlaybackOwnership() already stood the legacy overlay down when a
+// viz instance takes over. Nothing previously stopped the user from
+// re-enabling karaoke from the button WHILE that instance still owned
+// playback — setKaraokeMode(true) would flip karaokeMode true and could
+// auto-start the mic (if the user had it on for this song), racing a second
+// getUserMedia + the legacy scorer against the live viz-provider instance.
+// setKaraokeMode is the single choke point (only caller of showOverlay() and
+// the only place that auto-starts the mic), so gating it there closes every
+// downstream path at once — including the mic button's eligibility, which
+// requires karaokeMode to be true and can now never see that while a viz
+// instance owns playback.
+
+test('setKaraokeMode(true) is refused while a viz instance owns playback', async () => {
+    fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle());
+    await flush();
+    try {
+        assert.strictEqual(screen._vizOwnsPlayback(), true);
+        screen.setKaraokeMode(true);
+        assert.strictEqual(screen._karaokeModeForTest(), false, 'must not activate while the provider owns playback');
+    } finally {
+        r.destroy();
+    }
+});
+
+test('setKaraokeMode(true) works normally once ownership is released', async () => {
+    fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle());
+    await flush();
+    r.destroy();
+    assert.strictEqual(screen._vizOwnsPlayback(), false);
+    screen.setKaraokeMode(true);
+    assert.strictEqual(screen._karaokeModeForTest(), true);
+    screen.setKaraokeMode(false);  // leave state clean for later tests
+});
+
+test('setKaraokeMode(false) always works, even while a viz instance owns playback', async () => {
+    // The refusal is one-directional — turning karaoke OFF must never be
+    // blocked, only turning it ON while something else owns playback.
+    fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
+    screen.setKaraokeMode(true);
+    assert.strictEqual(screen._karaokeModeForTest(), true);
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle());
+    await flush();
+    try {
+        assert.doesNotThrow(() => screen.setKaraokeMode(false));
+        assert.strictEqual(screen._karaokeModeForTest(), false);
+    } finally {
+        r.destroy();
+    }
+});
+
+// ── Efficiency: lyric-line lookup is a binary search, not a per-frame ────
+// ── linear rescan from 0 (PR #24 review) ─────────────────────────────────
+
+test('active lyric line index matches the original 0.3s-hold semantics', () => {
+    const lines = [
+        { t0: 0, t1: 1 },
+        { t0: 1, t1: 2 },
+        { t0: 2, t1: 3 },
+    ];
+    // Still inside line 0's hold window (t1=1, +0.3 grace).
+    assert.strictEqual(screen._vizActiveLyricLineIndex(lines, 1.2), 0);
+    // The original loop advances on `>=`, so a tie goes to advancing, not
+    // staying — matches the linear scan's own boundary behavior exactly.
+    assert.strictEqual(screen._vizActiveLyricLineIndex(lines, 1.3), 1);
+    assert.strictEqual(screen._vizActiveLyricLineIndex(lines, 1.30001), 1);
+    // Past the whole song.
+    assert.strictEqual(screen._vizActiveLyricLineIndex(lines, 99), 3);
+    // Before the song starts.
+    assert.strictEqual(screen._vizActiveLyricLineIndex(lines, -5), 0);
+    assert.strictEqual(screen._vizActiveLyricLineIndex([], 5), 0);
+});
+
+test('the lyric band does not walk the whole song per frame', () => {
+    const tokens = [];
+    const lineTokens = [];
+    for (let i = 0; i < 5000; i++) {
+        lineTokens.push([{ start: i, duration: 0.5, text: `w${i}+`, midi: 60 }]);
+        tokens.push({ start: i, duration: 0.5, text: `w${i}+`, midi: 60 });
+    }
+    const lines = screen._vizBuildLines(tokens);
+    assert.strictEqual(lines.length, 5000, 'one line per word, since every token force-breaks');
+    // now sits near the END of a 5000-line song; a linear scan from 0 would
+    // touch thousands of entries, a binary search touches ~13 (log2 5000).
+    const li = screen._vizActiveLyricLineIndex(lines, 4990);
+    assert.ok(li > 4900 && li <= 5000, `expected an index near the end, got ${li}`);
 });

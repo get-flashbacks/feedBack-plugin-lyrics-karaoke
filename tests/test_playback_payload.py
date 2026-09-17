@@ -370,3 +370,21 @@ def test_playback_route_422_on_negative_arrangement(tmp_path, monkeypatch):
     response = endpoint(filename="song.sloppak", arrangement=-1)
 
     assert response.status_code == 422
+
+
+# ── _coerce_stringlike (factored out of _arrangement_identity) ──────────────
+
+def test_coerce_stringlike_accepts_str_and_int():
+    assert routes._coerce_stringlike("vocals") == "vocals"
+    assert routes._coerce_stringlike(7) == "7"
+
+
+def test_coerce_stringlike_rejects_bool_despite_being_an_int_subclass():
+    assert routes._coerce_stringlike(True) is None
+    assert routes._coerce_stringlike(False) is None
+
+
+def test_coerce_stringlike_rejects_other_types():
+    assert routes._coerce_stringlike(None) is None
+    assert routes._coerce_stringlike([1, 2]) is None
+    assert routes._coerce_stringlike({"a": 1}) is None
