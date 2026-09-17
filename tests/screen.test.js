@@ -15,6 +15,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
+const fs = require('node:fs');
 
 // ── Host stubs ──────────────────────────────────────────────────────────
 
@@ -120,7 +121,13 @@ global.document = {
 global.localStorage = global.window.localStorage;
 global.fetch = (url, opts) => fetchImpl(url, opts);
 
-const screen = require(path.join(__dirname, '..', 'screen.js'));
+const screen = require('../screen.js');
+
+// Read once, relative to THIS file's directory — deliberately not a bare
+// literal: tests run as `node tests/screen.test.js` from the repo root, so
+// fs.* (unlike require()) would resolve a literal relative path against
+// that cwd, not this file's location.
+const PLUGIN_JSON_PATH = path.join(__dirname, '..', 'plugin.json');
 
 /** Flush the fire-and-forget load chain (fetch -> .then -> emit). */
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -513,10 +520,7 @@ test('draw skips a zero-sized canvas', async () => {
 // ── Manifest / renderer agreement ───────────────────────────────────────
 
 test('every manifest-declared setting is backed by applySetting', () => {
-    const fs = require('node:fs');
-    const manifest = JSON.parse(
-        fs.readFileSync(path.join(__dirname, '..', 'plugin.json'), 'utf8'),
-    );
+    const manifest = JSON.parse(fs.readFileSync(PLUGIN_JSON_PATH, 'utf8'));
     const declared = manifest.capabilities.visualization.settings;
     assert.ok(Array.isArray(declared) && declared.length > 0);
 
@@ -543,10 +547,7 @@ test('every manifest-declared setting is backed by applySetting', () => {
 });
 
 test('manifest declares the visualization type and a minimum host', () => {
-    const fs = require('node:fs');
-    const manifest = JSON.parse(
-        fs.readFileSync(path.join(__dirname, '..', 'plugin.json'), 'utf8'),
-    );
+    const manifest = JSON.parse(fs.readFileSync(PLUGIN_JSON_PATH, 'utf8'));
     assert.strictEqual(manifest.type, 'visualization');
     assert.strictEqual(manifest.minHost, '0.3.0-alpha.1');
     // The preparation surface must survive taking on the second role (#14).
@@ -1251,4 +1252,108 @@ test('stripSyllableMarker strips a single trailing layout marker', () => {
     // Only ONE marker is ever stripped — a hyphen inside a word survives.
     assert.strictEqual(s('well-known'), 'well-known');
     assert.strictEqual(s('a--'), 'a-');
+});
+
+// ── Review fixes (Codacy/Codex on PR #24) ───────────────────────────────
+
+test('maxDurationAcrossVoices spans every voice, not just the first', () => {
+    assert.strictEqual(screen._vizMaxDurationAcrossVoices([]), 0);
+    assert.strictEqual(screen._vizMaxDurationAcrossVoices(null), 0);
+    assert.strictEqual(screen._vizMaxDurationAcrossVoices([
+        { tokens: [{ start: 0, duration: 0.5 }] },
+        { tokens: [{ start: 0, duration: 9.0 }] },  // longer, in the 2nd voice
+    ]), 9.0);
+    assert.strictEqual(screen._vizMaxDurationAcrossVoices([
+        { tokens: [{ start: 0, duration: 3 }] },
+        { tokens: [] },
+    ]), 3);
+});
+
+test('a duet guide note held longer than anything in the scored voice still renders', () => {
+    // Regression for the lookbehind bug: computing maxDuration from the
+    // scored voice alone meant a longer-held GUIDE note fell outside the
+    // lower-bound search window and silently vanished mid-sustain.
+    const scored = [{ start: 30, duration: 0.2, text: 'hi', midi: 60 }];
+    const guideHeldNote = { start: 0, duration: 20, text: 'aaah', midi: 67 };  // starts far back
+    const voices = [
+        { id: 'lead', primary: true, tokens: scored },
+        { id: 'harm', primary: false, tokens: [guideHeldNote] },
+    ];
+    const view = {
+        range: screen._vizSharedDiatonicRange(voices),
+        voices,
+        scoredIdx: 0,
+        tokens: scored,
+        lines: screen._vizBuildLines(scored),
+        // now=10 sits inside the guide note's sustain (0-20) but its `start`
+        // is far before the window — only a lookbehind covering the guide
+        // voice's own duration keeps it in view.
+        maxDuration: screen._vizMaxDurationAcrossVoices(voices),
+    };
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, view, 10);
+
+    const teal = ctx.fills.filter((f) => f === 'rgba(34,211,238,0.34)');
+    assert.strictEqual(teal.length, 1, 'the held guide note must still draw a bar');
+});
+
+test('a throwing wantsDetect() on the note_detect peer does not break renderer init', async () => {
+    fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
+    window.noteDetect = {
+        wantsDetect() { throw new Error('peer is broken'); },
+        isEnabled: () => false,
+        enable() { return Promise.resolve(); },
+        disable() {},
+    };
+    window.createNoteDetector = function () { return {}; };
+    const suppressed = [];
+    window.createNoteDetector.setDefaultSuppressed = (v) => suppressed.push(!!v);
+    try {
+        const r = window.feedBackViz_lyrics_karaoke();
+        const canvas = makeCanvas();
+        assert.doesNotThrow(() => r.init(canvas, bundle()));
+        await flush();
+        r.draw(bundle());
+        assert.ok(canvas._ctx.calls.includes('fillText'), 'renderer still works');
+        // Ownership was still claimed (suppression still happened) — the
+        // throwing probe only affects whether we later try to re-enable it.
+        assert.deepStrictEqual(suppressed, [true]);
+        assert.doesNotThrow(() => r.destroy());
+        assert.deepStrictEqual(suppressed, [true, false], 'release still runs');
+    } finally {
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
+test('pitch-range percentile math agrees between the overlay and the provider', () => {
+    // Pins the consolidation: both callers share _percentilePitchRange and
+    // must produce identical numeric ranges for the same pitch content —
+    // they differ only in null/default behavior at the edges.
+    const midis = [60, 62, 64, 65, 67, 69, 71];
+    const overlayRange = screen.computeSongPitchRange({
+        tokens: midis.map((m) => ({ midi: m })),
+    });
+    const vizRange = screen._vizPitchRange(midis.map((m) => ({ start: 0, duration: 1, midi: m })));
+    assert.strictEqual(overlayRange.lo, vizRange.lo);
+    assert.strictEqual(overlayRange.hi, vizRange.hi);
+});
+
+test('the shared percentile helper returns null on no pitched content', () => {
+    assert.strictEqual(screen._percentilePitchRange([]), null);
+});
+
+test('the overlay pitch range defaults sanely with no pitched tokens (null->default)', () => {
+    // computeSongPitchRange's contract: unlike _vizPitchRange, it never
+    // signals "lyrics-only" via null — the legacy overlay always draws a
+    // strip, so it substitutes the same default band the old inline code did.
+    const r = screen.computeSongPitchRange({ tokens: [] });
+    assert.strictEqual(r.lo, 60);
+    assert.ok(r.hi - r.lo >= 7);
+});
+
+test('the provider pitch range keeps signalling null on no pitched tokens', () => {
+    // The opposite contract: this null IS the flat-ribbon-fallback signal.
+    assert.strictEqual(screen._vizPitchRange([{ start: 0, duration: 1, text: 'a', midi: null }]), null);
 });

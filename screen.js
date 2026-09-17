@@ -146,6 +146,28 @@
         return pitchData;
     }
 
+    // Shared 5th/95th-percentile pitch-range math (screen.js's own two
+    // renderers — the legacy overlay and the visualization provider — both
+    // need "a fixed range for the whole song, widened to a floor". One
+    // implementation over a plain midi array; each caller adapts its own
+    // token shape and null contract on top. Percentiles trim outliers (a
+    // single octave-error midi shouldn't squash the rest of the song flat);
+    // the widen floor keeps a narrow melody from filling the whole strip.
+    function _percentilePitchRange(midis) {
+        if (!midis.length) return null;
+        const sorted = midis.slice().sort((a, b) => a - b);
+        const pct = (p) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(p * (sorted.length - 1))))];
+        let lo = pct(0.05);
+        let hi = pct(0.95);
+        if (hi - lo < MIN_PITCH_SPAN_SEMITONES) {
+            const center = (hi + lo) / 2;
+            const half = MIN_PITCH_SPAN_SEMITONES / 2;
+            lo = center - half;
+            hi = center + half;
+        }
+        return { lo, hi };
+    }
+
     // Compute a fixed pitch range for the whole song so a syllable's
     // vertical position stays put as the playhead scrolls. The previous
     // code recomputed lo/hi from the visible window every frame, which
@@ -159,18 +181,10 @@
         for (const t of tokens) {
             if (t && typeof t.midi === 'number') midis.push(t.midi);
         }
-        if (!midis.length) return { lo: 60, hi: 60 + MIN_PITCH_SPAN_SEMITONES };
-        midis.sort((a, b) => a - b);
-        const pct = (p) => midis[Math.min(midis.length - 1, Math.max(0, Math.floor(p * (midis.length - 1))))];
-        let lo = pct(0.05);
-        let hi = pct(0.95);
-        if (hi - lo < MIN_PITCH_SPAN_SEMITONES) {
-            const center = (hi + lo) / 2;
-            const half = MIN_PITCH_SPAN_SEMITONES / 2;
-            lo = center - half;
-            hi = center + half;
-        }
-        return { lo, hi };
+        // Unlike the provider's _vizPitchRange, this caller never signals
+        // "lyrics-only" via null — the legacy overlay always has a strip to
+        // draw, so an unpitched song still gets a sane default band.
+        return _percentilePitchRange(midis) || { lo: 60, hi: 60 + MIN_PITCH_SPAN_SEMITONES };
     }
 
     // ── Button wiring ──────────────────────────────────────────────────
@@ -1876,9 +1890,19 @@
         const factory = window.createNoteDetector;
         if (!factory || typeof factory.setDefaultSuppressed !== 'function') return;
         const singleton = window.noteDetect;
-        _vizRestoreNoteDetect = !!(singleton
-            && typeof singleton.wantsDetect === 'function'
-            && singleton.wantsDetect());
+        // Own try/catch, separate from the setDefaultSuppressed() call below:
+        // this probe runs AFTER this instance is already in _vizInstances and
+        // the overlay/karaoke may already be disabled (_vizClaimPlaybackOwnership
+        // calls this last), so a throw here must not escape init() and leave
+        // ownership half-claimed with nothing to tear it back down. Default to
+        // "wasn't on" on a throw — the safer failure than assuming it was.
+        let wantedDetect = false;
+        try {
+            wantedDetect = !!(singleton
+                && typeof singleton.wantsDetect === 'function'
+                && singleton.wantsDetect());
+        } catch (_) { /* never let a peer plugin break renderer init */ }
+        _vizRestoreNoteDetect = wantedDetect;
         try {
             factory.setDefaultSuppressed(true);
         } catch (_) { /* never let a peer plugin break renderer init */ }
@@ -2018,25 +2042,16 @@
     }
 
     /** Song-wide pitch window, computed ONCE per load so bars don't drift
-     *  vertically as the visible window scrolls. Mirrors
-     *  `computeSongPitchRange` but reads the canonical token shape. */
+     *  vertically as the visible window scrolls. Shares its percentile math
+     *  with `computeSongPitchRange` via `_percentilePitchRange`; unlike that
+     *  legacy caller, a null return here IS load-bearing — it's the signal
+     *  `draw` uses to fall back to the flat ribbon (#10). */
     function _vizPitchRange(tokens) {
         const midis = [];
         for (const tok of tokens) {
             if (tok.midi !== null) midis.push(tok.midi);
         }
-        if (!midis.length) return null;   // lyrics-only: flat ribbon (#10)
-        midis.sort((a, b) => a - b);
-        const pct = (p) => midis[Math.min(midis.length - 1, Math.max(0, Math.floor(p * (midis.length - 1))))];
-        let lo = pct(0.05);
-        let hi = pct(0.95);
-        if (hi - lo < MIN_PITCH_SPAN_SEMITONES) {
-            const center = (hi + lo) / 2;
-            const half = MIN_PITCH_SPAN_SEMITONES / 2;
-            lo = center - half;
-            hi = center + half;
-        }
-        return { lo, hi };
+        return _percentilePitchRange(midis);
     }
 
     /** Lower bound on `start` over a start-sorted token array — the index
@@ -2063,6 +2078,20 @@
         let max = 0;
         for (const tok of tokens) {
             if (tok.duration > max) max = tok.duration;
+        }
+        return max;
+    }
+
+    /** Longest token duration across EVERY voice, not just the scored one.
+     *  The stage shares one lookbehind between the scored voice's slabs and
+     *  every guide voice's bars — computing it from the scored voice alone
+     *  would let a longer-held guide note fall outside the lower-bound
+     *  search window and vanish mid-sustain. */
+    function _vizMaxDurationAcrossVoices(voices) {
+        let max = 0;
+        for (const v of (voices || [])) {
+            const d = _vizMaxDuration(v.tokens || []);
+            if (d > max) max = d;
         }
         return max;
     }
@@ -2626,7 +2655,7 @@
                     ? _vizSharedDiatonicRange(voices)
                     : _vizDiatonicRange(tokens);
                 lines = _vizBuildLines(tokens);
-                maxDuration = _vizMaxDuration(tokens);
+                maxDuration = _vizMaxDurationAcrossVoices(voices);
                 loadedKey = key;
                 _vizEmit('lyrics_karaoke:renderer-ready', {
                     filename,
@@ -2853,7 +2882,10 @@
             stripSyllableMarker,
             _vizPitchRange,
             _vizMaxDuration,
+            _vizMaxDurationAcrossVoices,
             _vizLowerBound,
+            _percentilePitchRange,
+            computeSongPitchRange,
             _vizOwnsPlayback,
             _vizDrawFrame,
         };
