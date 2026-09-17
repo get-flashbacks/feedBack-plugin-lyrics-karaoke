@@ -15,7 +15,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
-const fs = require('node:fs');
 
 // ── Host stubs ──────────────────────────────────────────────────────────
 
@@ -123,11 +122,15 @@ global.fetch = (url, opts) => fetchImpl(url, opts);
 
 const screen = require('../screen.js');
 
-// Read once, relative to THIS file's directory — deliberately not a bare
-// literal: tests run as `node tests/screen.test.js` from the repo root, so
-// fs.* (unlike require()) would resolve a literal relative path against
-// that cwd, not this file's location.
-const PLUGIN_JSON_PATH = path.join(__dirname, '..', 'plugin.json');
+// Node's require() natively loads and parses a .json file (Module._extensions
+// caches the result), so this needs no fs.readFileSync/JSON.parse pair at
+// all — and, like the screen.js require above, a literal relative path here
+// resolves against THIS file's directory regardless of cwd, sidestepping the
+// portability trap a bare fs.readFileSync(...) literal would hit (tests run
+// as `node tests/screen.test.js` from the repo root, so fs.* — unlike
+// require() — would resolve a literal against that cwd, not this file's
+// location).
+const PLUGIN_MANIFEST = require('../plugin.json');
 
 /** Flush the fire-and-forget load chain (fetch -> .then -> emit). */
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -520,8 +523,7 @@ test('draw skips a zero-sized canvas', async () => {
 // ── Manifest / renderer agreement ───────────────────────────────────────
 
 test('every manifest-declared setting is backed by applySetting', () => {
-    const manifest = JSON.parse(fs.readFileSync(PLUGIN_JSON_PATH, 'utf8'));
-    const declared = manifest.capabilities.visualization.settings;
+    const declared = PLUGIN_MANIFEST.capabilities.visualization.settings;
     assert.ok(Array.isArray(declared) && declared.length > 0);
 
     const r = window.feedBackViz_lyrics_karaoke();
@@ -547,13 +549,12 @@ test('every manifest-declared setting is backed by applySetting', () => {
 });
 
 test('manifest declares the visualization type and a minimum host', () => {
-    const manifest = JSON.parse(fs.readFileSync(PLUGIN_JSON_PATH, 'utf8'));
-    assert.strictEqual(manifest.type, 'visualization');
-    assert.strictEqual(manifest.minHost, '0.3.0-alpha.1');
+    assert.strictEqual(PLUGIN_MANIFEST.type, 'visualization');
+    assert.strictEqual(PLUGIN_MANIFEST.minHost, '0.3.0-alpha.1');
     // The preparation surface must survive taking on the second role (#14).
-    assert.strictEqual(manifest.screen, 'screen.html');
-    assert.ok(manifest.nav && manifest.nav.label);
-    assert.strictEqual(manifest.routes, 'routes.py');
+    assert.strictEqual(PLUGIN_MANIFEST.screen, 'screen.html');
+    assert.ok(PLUGIN_MANIFEST.nav && PLUGIN_MANIFEST.nav.label);
+    assert.strictEqual(PLUGIN_MANIFEST.routes, 'routes.py');
 });
 
 // ── Regression: a failed load must not refetch on every frame ───────────
