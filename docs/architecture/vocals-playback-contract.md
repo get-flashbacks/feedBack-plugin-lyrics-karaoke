@@ -42,7 +42,7 @@ unpitched. Missing `midi` means “lyrics only”; it is not an error.
   non-negative index is echoed with null identity fields.
 - Each voice has a stable `id`, a display `name`, and exactly one
   `primary: true` voice when voice data is present.
-- Tokens are sorted by finite `start). `duration` is finite and
+- Tokens are sorted by finite `start`. `duration` is finite and
   non-negative; zero-duration tokens are valid cue markers.
 - Invalid token records are dropped at the boundary. A malformed present
   sidecar file is different: return HTTP 422 rather than silently treating
