@@ -34,12 +34,15 @@ unpitched. Missing `midi` means “lyrics only”; it is not an error.
 
 ## Boundary rules
 
-- `schema_version` is an integer. Consumers must reject unsupported
-  versions and emit a renderer-failed event with actionable context.
+- `schema_version` is an integer. Version 1 is the current supported
+  contract. Consumers must check it before interpreting the payload and
+  emit a renderer-failed event with actionable context if they cannot
+  support the received version.
 - `song.filename` is the requested filename, not a server filesystem path.
 - `arrangement.index` is the optional zero-based query parameter. When it
-  is omitted, `index`, `id`, and `name` are null. An unresolved
-  non-negative index is echoed with null identity fields.
+  is omitted, `index`, `id`, and `name` are null. Negative indexes return
+  HTTP 422. An unresolved non-negative index is echoed with null identity
+  fields.
 - Each voice has a stable `id`, a display `name`, and exactly one
   `primary: true` voice when voice data is present.
 - Tokens are sorted by finite `start`. `duration` is finite and
@@ -47,8 +50,9 @@ unpitched. Missing `midi` means “lyrics only”; it is not an error.
 - Invalid token records are dropped at the boundary. A malformed present
   sidecar file is different: return HTTP 422 rather than silently treating
   it as an unprepared song.
-- An absent song, absent lyrics, or absent pitch sidecar is handled as
-  HTTP 404 where the route currently defines that condition.
+- An absent song or a pack with no usable lyric tokens is handled as
+  HTTP 404 where the route currently defines that condition. An absent
+  pitch sidecar by itself is valid and returns a 200 lyrics-only payload.
 - The route only reads prepared files. It must never run pitch extraction,
   load an audio model, or touch microphone state.
 
