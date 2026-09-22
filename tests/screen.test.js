@@ -784,6 +784,69 @@ test('two panels suppress once and restore once, not per panel', async () => {
     }
 });
 
+test('re-init keeps playback ownership while replacing an in-flight load', async () => {
+    bus.reset();
+    const log = installNoteDetect({ wantsDetect: true });
+    let finishFirst;
+    const requests = [];
+    fetchImpl = (url, opts) => {
+        requests.push({ url, signal: opts && opts.signal });
+        if (requests.length === 1) {
+            return new Promise((resolve) => { finishFirst = resolve; });
+        }
+        return jsonFetch(okPayload([{ start: 1, duration: 1, text: 'new', midi: 60 }]))();
+    };
+    const r = window.feedBackViz_lyrics_karaoke();
+    try {
+        const oldCanvas = makeCanvas();
+        const newCanvas = makeCanvas();
+        r.init(oldCanvas, bundle());
+        r.init(newCanvas, bundle({ songInfo: {
+            filename: 'new.sloppak', arrangement_index: 0, arrangement: 'Vocals',
+        } }));
+        assert.strictEqual(requests[0].signal.aborted, true, 'old load must be cancelled');
+        assert.deepStrictEqual(log.suppressed, [true], 're-init must not release and re-claim');
+        assert.strictEqual(log.enabled, 0, 'old microphone owner must stay off');
+
+        finishFirst({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(okPayload([]))) });
+        await flush();
+        assert.deepStrictEqual(bus.of('lyrics_karaoke:renderer-ready').map((e) => e.detail.filename),
+            ['new.sloppak'], 'stale first load must not emit ready');
+        r.draw(bundle({ songInfo: { filename: 'new.sloppak', arrangement_index: 0, arrangement: 'Vocals' } }));
+        assert.ok(newCanvas._ctx.calls.includes('fillText'));
+        assert.deepStrictEqual(oldCanvas._ctx.calls, [], 'old panel canvas must not be reused');
+    } finally {
+        r.destroy();
+        removeNoteDetect();
+    }
+    assert.deepStrictEqual(log.suppressed, [true, false]);
+    assert.strictEqual(log.enabled, 1, 'original microphone owner restored only on final destroy');
+});
+
+test('a failed re-init releases ownership and cannot keep drawing on the old canvas', async () => {
+    bus.reset();
+    const log = installNoteDetect({ wantsDetect: true });
+    fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'old', midi: 60 }]));
+    const r = window.feedBackViz_lyrics_karaoke();
+    try {
+        const canvas = makeCanvas();
+        r.init(canvas, bundle());
+        await flush();
+        r.init(makeCanvas({ contextFails: true }), bundle());
+        assert.strictEqual(screen._vizOwnsPlayback(), false);
+        assert.deepStrictEqual(log.suppressed, [true, false]);
+        assert.strictEqual(log.enabled, 1);
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').at(-1).detail.reason, 'no-2d-context');
+        canvas._ctx.calls.length = 0;
+        r.draw(bundle());
+        assert.deepStrictEqual(canvas._ctx.calls, []);
+    } finally {
+        r.destroy();
+        removeNoteDetect();
+    }
+    assert.deepStrictEqual(log.suppressed, [true, false], 'extra destroy must not re-release');
+});
+
 test('a failed init claims nothing, so note_detect keeps the mic', () => {
     const log = installNoteDetect({ wantsDetect: true });
     try {

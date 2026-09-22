@@ -2713,17 +2713,18 @@
             contextType: '2d',
 
             init(canvas, bundle) {
-                // Defensive: core may re-init an instance that was already
-                // destroyed (playSong does stop() -> init() to reuse the
-                // canvas), and a caller could in principle init twice
-                // without an intervening destroy. Start from a clean slate
-                // either way rather than stacking state.
-                if (initialized) this.destroy();
+                // Re-init resets this panel's load, but must NOT release and
+                // re-claim shared playback ownership while it stays live:
+                // that would momentarily restore the legacy overlay and
+                // note_detect (and could start a second microphone session).
+                abortInflight();
+                loadSeq++;
                 destroyed = false;
                 ctx2d = null;
                 resetLoadState();
 
                 if (!canvas || typeof canvas.getContext !== 'function') {
+                    this.destroy();
                     _vizEmit('lyrics_karaoke:renderer-failed', {
                         reason: 'no-canvas',
                         message: 'Host provided no usable canvas element; '
@@ -2739,6 +2740,7 @@
                     ctx2d = null;
                 }
                 if (!ctx2d) {
+                    this.destroy();
                     _vizEmit('lyrics_karaoke:renderer-failed', {
                         reason: 'no-2d-context',
                         message: 'Could not acquire a 2d context on the highway canvas.',
@@ -2746,12 +2748,13 @@
                     return;
                 }
 
-                initialized = true;
-                _vizInstances.add(this);
-                // Exactly one owner of playback at a time (#10) — covering
-                // both this plugin's legacy overlay AND note_detect's
-                // default singleton.
-                _vizClaimPlaybackOwnership();
+                if (!initialized) {
+                    initialized = true;
+                    _vizInstances.add(this);
+                    // Exactly one owner of playback at a time (#10) —
+                    // covering the legacy overlay and note_detect.
+                    _vizClaimPlaybackOwnership();
+                }
 
                 if (bundle && bundle.songInfo) load(bundle.songInfo);
             },
@@ -2805,6 +2808,7 @@
                 // Flip `destroyed` FIRST: an in-flight fetch continuation or
                 // a stray draw must see a torn-down instance even if the
                 // abort below is unavailable (no AbortController).
+                const wasInitialized = initialized;
                 destroyed = true;
                 initialized = false;
                 abortInflight();
@@ -2813,7 +2817,7 @@
                 ctx2d = null;
                 _vizInstances.delete(this);
                 // Last one out hands playback back to whoever we displaced.
-                _vizReleasePlaybackOwnership();
+                if (wasInitialized) _vizReleasePlaybackOwnership();
             },
 
             // Per-instance settings (feedBack#849). The host renders these
