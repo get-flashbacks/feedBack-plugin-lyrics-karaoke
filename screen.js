@@ -2433,7 +2433,7 @@
         }
         while (beat < 0.4) beat *= 2;
         while (beat > 0.9) beat /= 2;
-        return Math.max(0.35, Math.min(0.95, beat));
+        return beat;
     }
 
     /** Karaoke Highway phase-2 cue: bounce beneath the active syllable, or

@@ -218,11 +218,19 @@ def test_build_playback_payload_reads_duet_vocal_tracks(tmp_path):
     assert payload["voices"][1]["tokens"][0]["midi"] == 67
 
 
-def test_duet_first_usable_voice_becomes_primary_and_extra_flags_are_cleared(tmp_path):
-    for name in ("a", "b"):
+def _write_lyrics_only_tracks(tmp_path, names):
+    """Write a minimal single-syllable lyrics.json for each name in
+    ``names`` (used as both the filename stem and the sung word) — shared
+    setup for the ``vocal_tracks`` primary/dedup tests below, which only
+    care about track identity, not token content."""
+    for name in names:
         (tmp_path / f"{name}.json").write_text(json.dumps([
             {"t": 0.0, "d": 1.0, "w": name},
         ]), encoding="utf-8")
+
+
+def test_duet_first_usable_voice_becomes_primary_and_extra_flags_are_cleared(tmp_path):
+    _write_lyrics_only_tracks(tmp_path, ("a", "b"))
     manifest = {"vocal_tracks": [
         {"id": "a", "primary": True, "lyrics": "a.json"},
         {"id": "b", "primary": True, "lyrics": "b.json"},
@@ -234,10 +242,7 @@ def test_duet_first_usable_voice_becomes_primary_and_extra_flags_are_cleared(tmp
 
 
 def test_duet_rejects_duplicate_voice_ids(tmp_path):
-    for name in ("a", "b"):
-        (tmp_path / f"{name}.json").write_text(json.dumps([
-            {"t": 0.0, "d": 1.0, "w": name},
-        ]), encoding="utf-8")
+    _write_lyrics_only_tracks(tmp_path, ("a", "b"))
     manifest = {"vocal_tracks": [
         {"id": "same", "lyrics": "a.json"},
         {"id": "same", "lyrics": "b.json"},

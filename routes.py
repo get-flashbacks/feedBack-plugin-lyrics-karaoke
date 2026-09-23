@@ -300,13 +300,22 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
 def _canonical_voices(source_dir: Path, manifest: dict) -> list[dict]:
     """Build canonical voice streams from ``vocal_tracks`` or solo aliases.
 
-    ``vocal_tracks`` is an additive manifest extension shared with the
-    reference Karaoke Highway implementation. Each entry carries ``id``,
-    optional ``name``/``primary``, and its own ``lyrics``/``vocal_pitch``
-    pointers. Invalid non-mapping/empty entries are ignored like unusable
-    token rows; duplicate ids are rejected because panel-local selection
-    requires stable, unambiguous identity. Exactly one returned voice is
-    primary (first flagged, otherwise first usable voice).
+    PROVENANCE: the ``vocal_tracks`` merge shape (per-entry ``id``/``name``/
+    ``primary``/``lyrics``/``vocal_pitch``, exactly-one-primary guarantee) is
+    adapted from Karaoke Highway's ``_build_voices``
+    (https://github.com/Taynavv/feedback-vocals-viz, `routes.py`,
+    AGPL-3.0) — the reference implementation this epic absorbs (#18). See
+    docs/architecture/vocals-visualization-integration.md's Provenance
+    section for the reciprocal direction (this plugin's overlay geometry,
+    ported the other way into that repo).
+
+    ``vocal_tracks`` is an additive manifest extension shared with that
+    reference implementation. Each entry carries ``id``, optional
+    ``name``/``primary``, and its own ``lyrics``/``vocal_pitch`` pointers.
+    Invalid non-mapping/empty entries are ignored like unusable token rows;
+    duplicate ids are rejected because panel-local selection requires
+    stable, unambiguous identity. Exactly one returned voice is primary
+    (first flagged, otherwise first usable voice).
     """
     voices: list[dict] = []
     tracks = manifest.get("vocal_tracks")
