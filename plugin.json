@@ -1,7 +1,7 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"
@@ -81,6 +81,20 @@
           ]
         }
       ]
+    },
+    "audio-input": {
+      "roles": [
+        "provider"
+      ],
+      "operations": [
+        "register-source",
+        "unregister-source"
+      ],
+      "mode": "active",
+      "compatibility": "degrade-noop",
+      "ownership": "multi-provider",
+      "safety": "sensitive",
+      "description": "Registers the karaoke microphone as a managed input source while it is listening. Capture stays in-plugin; no audio is stored or transmitted."
     }
   },
   "private": false,
