@@ -2022,8 +2022,10 @@
         return out;
     }
 
-    /** Which voice this panel scores and draws as slabs. Prefers the
-     *  `primary` one; per-panel singer selection is #16. */
+    /** The `primary` voice, or the first voice if none is flagged. This is
+     *  the default a panel scores/draws before any explicit part selection;
+     *  `_vizSelectedVoiceIndex` below layers the panel-local `sungPart`
+     *  setting on top of it. */
     function _vizScoredIndex(voices) {
         if (!voices || !voices.length) return -1;
         const p = voices.findIndex((v) => v.primary);
