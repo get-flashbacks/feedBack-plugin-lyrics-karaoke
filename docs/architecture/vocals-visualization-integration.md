@@ -452,9 +452,15 @@ there is no second YIN implementation, microphone path, or scorer.
   the skipped syllables unjudged instead of counting them as misses.
   Lyric-only syllables are never judged.
 - **Device and channel** are properties of the one microphone, so they
-  live in the shared control rather than per-panel settings: device picker
-  (labels appear after permission; re-listed on `devicechange`) and a
-  Mix / Ch 1 / Ch 2 channel picker for interfaces presenting one stereo
+  live in the shared control rather than per-panel settings. In splitscreen
+  that control also shows a scoring-panel selector labelled with each local
+  song and selected voice. Changing the selector during capture releases the
+  old stream completely before requesting the new owner, so two panels can
+  never capture concurrently. Closing a selected panel falls back to the next
+  eligible panel but leaves the microphone off; song and part changes likewise
+  require another explicit click. The device picker (labels appear after
+  permission; re-listed on `devicechange`) and a Mix / Ch 1 / Ch 2 channel
+  picker support interfaces presenting one stereo
   device. Both apply without reloading — a channel change on the next
   buffer, a device change by restarting the stream for the same owner.
 - **Settings namespace.** Engine preferences are one versioned document,
@@ -478,16 +484,17 @@ there is no second YIN implementation, microphone path, or scorer.
   per-syllable `quality`/`accuracy` (`getScoreResult(i)`), which is what a
   note-state provider would return.
 - **Not in #11:** the end-of-song summary (#15 — the renderer exposes
-  `getScoreStats()` / `getScoreResult(i)` / `getSungTrace()` for it);
-  per-panel microphone arbitration in splitscreen (#16 — until then the
-  mic scores the first live panel with mic feedback on and a pitched
-  part).
+  `getScoreStats()` / `getScoreResult(i)` / `getSungTrace()` for it).
 
 ## Compatibility and migration policy
 
 - A pack prepared by the current plugin (`lyrics.json` + `vocal_pitch.json`
   referenced from the manifest) plays back through the new provider with
   **no regeneration** — `/playback` already reads those exact keys.
+- A duet may retain those singular keys as legacy aliases. When either alias
+  differs from the primary `vocal_tracks` entry, `/playback` keeps serving the
+  canonical multi-voice payload but logs a route-time warning so authors can
+  fix the pack before legacy and duet-aware readers show different leads.
 - The preparation screen's generate/re-extract/clear/export routes are
   untouched by this integration.
 - **Rollback:** disabling the provider's visualization capability (or

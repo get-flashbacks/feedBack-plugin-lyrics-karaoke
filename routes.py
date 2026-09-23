@@ -318,6 +318,7 @@ def _canonical_voices(source_dir: Path, manifest: dict) -> list[dict]:
     (first flagged, otherwise first usable voice).
     """
     voices: list[dict] = []
+    voice_sources: list[dict] = []
     tracks = manifest.get("vocal_tracks")
     if isinstance(tracks, list) and tracks:
         seen_ids: set[str] = set()
@@ -345,9 +346,23 @@ def _canonical_voices(source_dir: Path, manifest: dict) -> list[dict]:
                 "primary": is_primary,
                 "tokens": tokens,
             })
+            voice_sources.append(entry)
         if voices:
             if not primary_seen:
                 voices[0]["primary"] = True
+            primary_index = next(i for i, voice in enumerate(voices) if voice["primary"])
+            primary_source = voice_sources[primary_index]
+            drifted = []
+            for key in ("lyrics", "vocal_pitch"):
+                alias = _coerce_stringlike(manifest.get(key))
+                target = _coerce_stringlike(primary_source.get(key))
+                if alias is not None and alias != target:
+                    drifted.append(key)
+            if drifted:
+                _log.warning(
+                    "Legacy vocal alias(es) %s do not match primary vocal track %r in %s",
+                    ", ".join(drifted), voices[primary_index]["id"], source_dir,
+                )
             return voices
 
     tokens = _canonical_voice_tokens(source_dir, manifest)
