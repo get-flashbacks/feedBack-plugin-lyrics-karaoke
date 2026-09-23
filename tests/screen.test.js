@@ -1598,3 +1598,60 @@ test('the lyric band does not walk the whole song per frame', () => {
     const li = screen._vizActiveLyricLineIndex(lines, 4990);
     assert.ok(li > 4900 && li <= 5000, `expected an index near the end, got ${li}`);
 });
+
+// ── Scoring layers on the stage (#11) ───────────────────────────────────
+
+function scoreView(over) {
+    return Object.assign({
+        live: true,
+        stats: { score: 230, streak: 2, bestStreak: 2, hits: 2, misses: 0, judged: 2, accuracy: 0.9 },
+        resultFor: (i) => (i === 0 ? { samplesIn: 10, samplesMatched: 10, accuracy: 1, quality: 'perfect' } : null),
+        trace: [{ t: 1.0, midi: 60 }, { t: 1.05, midi: 60.3 }, { t: 1.1, midi: 60.1 }],
+    }, over || {});
+}
+
+test('the stage draws no scoring layers for a panel that is not scoring', () => {
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView(), 1.2);
+    assert.ok(!ctx.texts.some((t) => t.t === 'SCORE'));
+    assert.ok(!ctx.gradients.some((g) => g.stops.some(([, c]) => /^rgb\(/.test(c))),
+        'no accuracy tint');
+});
+
+test('the stage draws the stats band, accuracy tint and sung trace while scoring', () => {
+    const plain = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(plain, 960, 480, stageView(), 1.2);
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({ score: scoreView() }), 1.2);
+
+    const texts = ctx.texts.map((t) => t.t);
+    for (const want of ['SCORE', 'STREAK', 'ACCURACY', '230', '2', '90%']) {
+        assert.ok(texts.includes(want), `missing stats text ${want}`);
+    }
+    // Stats band sits in the reserved top band, above the notes.
+    const scoreLabel = ctx.texts.find((t) => t.t === 'SCORE');
+    assert.ok(scoreLabel.y < 50 * (480 / 480) + 8);
+    // A perfect syllable gets the green end of the ramp.
+    const tint = ctx.gradients.find((g) => g.stops.some(([, c]) => /^rgb\(/.test(c)));
+    assert.ok(tint, 'sung portion tinted');
+    assert.match(tint.stops[1][1], /^rgb\(42, 169, 122\)$/);
+    // One extra stroke: the sung trace.
+    const strokes = (c) => c.calls.filter((k) => k === 'stroke').length;
+    assert.strictEqual(strokes(ctx), strokes(plain) + 1);
+});
+
+test('a finished (not live) take shows best streak and no trace past now', () => {
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({
+        score: scoreView({ live: false, trace: [{ t: 5, midi: 60 }], stats: {
+            score: 0, streak: 0, bestStreak: 7, hits: 0, misses: 1, judged: 1, accuracy: null,
+        } }),
+    }), 1.2);
+    const texts = ctx.texts.map((t) => t.t);
+    assert.ok(texts.includes('best 7'));
+    assert.ok(texts.includes('—'), 'no accuracy yet');
+    const plain = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(plain, 960, 480, stageView(), 1.2);
+    const strokes = (c) => c.calls.filter((k) => k === 'stroke').length;
+    assert.strictEqual(strokes(ctx), strokes(plain), 'future trace points are not drawn');
+});

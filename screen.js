@@ -143,6 +143,7 @@
         if (pitchData && Array.isArray(pitchData.tokens)) {
             pitchData.tokens.forEach((tok, i) => { if (tok) tokenIndexMap.set(tok, i); });
         }
+        _lkOverlaySyncTokens();
         return pitchData;
     }
 
@@ -410,7 +411,8 @@
             // opt-in on song A doesn't auto-prompt on song B.
             // Fire-and-forget; refreshMicUi reflects the requesting/
             // listening/error transitions as the promise progresses.
-            if (micWantOnForSong && status && status.has_pitch && songHasMidi() && micState === 'off') {
+            if (micWantOnForSong && status && status.has_pitch && songHasMidi() && overlayMicState() !== 'listening'
+                && overlayMicState() !== 'requesting' && overlayMicState() !== 'suspended') {
                 startMic();
             }
         } else {
@@ -418,7 +420,7 @@
             // Tear the mic stream down with the overlay — there's nothing
             // to render to. keepFlag preserves the on/off intent so the
             // next karaoke toggle on the same song restores the mic.
-            if (micState !== 'off') stopMic({ keepFlag: true });
+            if (overlayMicState() !== 'off') stopMic({ keepFlag: true });
             resetUserResults();
             if (window.highway && typeof window.highway.setLyricsVisible === 'function') {
                 window.highway.setLyricsVisible(savedShowLyrics);
@@ -651,12 +653,12 @@
         }
 
         // Mic-feedback overlays — only when the user has been singing.
-        if (userResults.size > 0 || micState === 'listening') {
+        if (_lkOverlayScorer.hasResults() || overlayMicState() === 'listening') {
             for (const { tok, midi } of visible) {
                 if (midi == null) continue;
                 const idx = tokenIndexMap.get(tok);
                 if (idx === undefined) continue;
-                const entry = userResults.get(idx);
+                const entry = _lkOverlayResultFor(idx);
                 if (!entry || entry.samplesIn === 0) continue;
                 const acc = entry.accuracy;
                 const x0 = xFor(tok.t);
@@ -671,9 +673,9 @@
             // Freshness uses wall-clock ms, not song time — when playback
             // is paused getNow() stops advancing but the user has stopped
             // singing live too, so the line/pill should still age out.
-            const fresh = (_wallNow() - userLastSampleWallAt) <= _LK_SAMPLE_FRESH_MS;
-            if (fresh && userPitchSamples.length) {
-                const last = userPitchSamples[userPitchSamples.length - 1];
+            const last = _lkOverlayScorer.lastSample();
+            const fresh = !!last && (_wallNow() - last.wallAt) <= _LK_SAMPLE_FRESH_MS;
+            if (fresh) {
                 if (userDisplayMidi == null) {
                     userDisplayMidi = last.midi;
                 } else {
@@ -724,21 +726,49 @@
         c.fill();
     }
 
-    // ── Mic pitch feedback (live) ──────────────────────────────────────
+    // ── Vocal pitch engine: YIN, scoring, microphone (#11) ─────────────
     //
-    // YIN + getUserMedia + ScriptProcessor accumulator are adapted from
-    // the slopsmith note_detect plugin. Vocals are monophonic so YIN alone
-    // is sufficient — no CREPE/HPS/WASM. Once a third consumer of this
-    // pattern arrives, factor into a shared module (tracked as issue #5).
+    // ONE engine, shared by the legacy overlay and the visualization
+    // provider, so there are never two microphone paths or two scorers:
+    //
+    //  - Pure helpers (YIN, pitch distance, frame dating, channel pick,
+    //    settings normalization) — unit-tested without a microphone.
+    //  - `_lkCreateVocalScorer()` — per-owner scoring state (per-syllable
+    //    hit quality, score, streak, best streak, accuracy, sung trace).
+    //    Each overlay/provider instance holds its own; nothing is shared.
+    //  - `_lkCreateMicController()` — the single microphone. Exactly one
+    //    owner at a time: `start()` refuses while someone else holds it,
+    //    which is what makes "only one scoring subsystem" structural rather
+    //    than a convention each caller has to remember.
+    //
+    // YIN + getUserMedia + the ScriptProcessor ring buffer were adapted
+    // from the slopsmith note_detect plugin; the octave-free distance,
+    // stereo channel pick, mic timing offset, seek gate and the score /
+    // streak formula are adapted from Karaoke Highway
+    // (https://github.com/Taynavv/feedback-vocals-viz, AGPL-3.0), which in
+    // turn adapted its engine from this file. Vocals are monophonic, so YIN
+    // alone is sufficient — no CREPE/HPS/WASM.
     const _LK_YIN_FRAME_SIZE = 2048;
     const _LK_YIN_MIN_SAMPLES = 4096;
     const _LK_YIN_MIN_HZ = 50;        // human vocal floor — drops sub-bass artefacts
     const _LK_YIN_MAX_HZ = 1100;      // upper end of soprano range
     const _LK_YIN_CONFIDENCE = 0.5;   // YIN clarity score; below = unvoiced
-    const _LK_MATCH_TOLERANCE = 1.0;  // semitones; locked for v1
+    const _LK_FRAME_INTERVAL_MS = 50;
     const _LK_SAMPLE_FRESH_MS = 200;  // stale samples don't draw the user line
-    const _LK_SAMPLE_RING_CAP = 256;  // ~12 s at 50 ms cadence
-    const _LK_STORAGE_KEY = 'lyrics_karaoke.micFeedback';
+    const _LK_TRACE_CAP = 256;        // ~12 s at 50 ms cadence
+    // Transport gate. The highway clock's AV-drift resync steps backward by
+    // a few ms mid-song, so only a sizeable backward jump is a rewind (and
+    // wipes the take); smaller backsteps are dropped like a pause. A large
+    // forward jump is a skip: the syllables jumped over are left unjudged
+    // rather than counted as misses the singer never had a chance at.
+    const _LK_SEEK_BACK_S = 0.25;
+    const _LK_SEEK_FORWARD_S = 1.5;
+    const _LK_HIT_ACCURACY = 0.5;     // syllable is a hit at >= 50% matched frames
+    const _LK_PERFECT_ACCURACY = 0.9;
+    const _LK_STORAGE_KEY = 'lyrics_karaoke.micFeedback';   // legacy overlay on/off bit
+    const _LK_PREFS_KEY = 'lyrics_karaoke.prefs.v1';        // engine settings (see _lkLoadPrefs)
+    const _LK_MIC_CHANNELS = ['mix', '1', '2'];
+    const _LK_MANAGED_SOURCE_ID = 'lyrics_karaoke:mic';
     const _LK_PITCH_LINE_COLOR = '#22d3ee';
     const _LK_PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
     // Preallocated YIN working buffer reused across every 50ms detection
@@ -804,37 +834,753 @@
         };
     }
 
-    // Mic state — implicit-flag style mirroring note_detect's pattern.
-    let micState = 'off';            // 'off' | 'requesting' | 'listening' | 'error'
-    let micBtn = null;
-    let micPill = null;
-    let micStream = null;
-    let micCtx = null;
-    let micSourceNode = null;
-    let micProcessor = null;
-    let micTimer = null;
-    let micSessionGen = 0;            // bumped on stop to invalidate stale frames
-    let micRingBuffer = null;         // preallocated sliding window (Float32Array, _LK_YIN_MIN_SAMPLES)
-    let micRingCount = 0;             // total samples written into ring since mic start
-    let micPendingBuffer = null;      // preallocated snapshot buffer (Float32Array, same size)
-    let micPendingReady = false;      // true when pending buffer has a fresh snapshot
-    let micPendingBufferAt = -Infinity;  // song-time at the buffer's midpoint
-    let micPendingSession = 0;           // micSessionGen at the time the snapshot was taken
-    let micLastCapturedAt = -Infinity;   // previous frame's song-time, for stall/seek detection
-    let micErrorMsg = '';
-    let micPillLastText = '';            // last text written to micPill; avoids per-frame DOM writes
-    // Session-scoped intent: "the user enabled mic for THIS song." Used
-    // to auto-restore the mic when karaoke is toggled off and back on
-    // for the same song without spilling that intent across songs (a
-    // resetForNewSong clears it). The persisted localStorage flag is
-    // separate and serves a future "remember on reload" surface.
-    let micWantOnForSong = false;
+    /** YIN result → a sung MIDI pitch, or null for an unvoiced / out-of-range
+     *  frame. Unvoiced frames still matter to the scorer (they advance the
+     *  transport), so the caller forwards null rather than dropping them. */
+    function _lkDetectMidi(buffer, sampleRate) {
+        const r = yinDetect(buffer, sampleRate, _LK_YIN_MIN_HZ);
+        if (!r || r.freq <= 0 || r.confidence < _LK_YIN_CONFIDENCE) return null;
+        if (r.freq < _LK_YIN_MIN_HZ || r.freq > _LK_YIN_MAX_HZ) return null;
+        const midi = freqToMidi(r.freq);
+        return isFinite(midi) ? { midi, confidence: r.confidence } : null;
+    }
 
-    // Per-song bookkeeping for the live overlay.
-    const userPitchSamples = [];      // ring of {t, midi, confidence}
-    const userResults = new Map();    // tokenIndex → {samplesIn, samplesMatched, accuracy}
-    let userDisplayMidi = null;       // smoothed value used for the pitch line + pill
-    let userLastSampleWallAt = -Infinity; // wall-clock ms of latest sample (used for staleness)
+    /** Semitone distance between a sung and a target pitch. Octave-free
+     *  matching folds it onto [0, 6] so singing the melody an octave (or
+     *  two) away from the chart still counts. */
+    function _lkPitchDistance(sung, target, octaveIndependent) {
+        let d = Math.abs(sung - target);
+        if (octaveIndependent) {
+            d %= 12;
+            if (d > 6) d = 12 - d;
+        }
+        return d;
+    }
+
+    /** Tolerance is inclusive; the epsilon keeps a sung pitch exactly on the
+     *  boundary from failing on float noise (e.g. 60.5 - 60 vs 0.5). */
+    function _lkPitchMatches(sung, target, tolerance, octaveIndependent) {
+        return _lkPitchDistance(sung, target, octaveIndependent) <= tolerance + 1e-9;
+    }
+
+    /** Song time a captured buffer represents. The ring spans the most
+     *  recent `ringSize` samples, i.e. [clock - window, clock] in wall time,
+     *  so its representative time is the MIDPOINT — scoring lands on the
+     *  syllable actually being sung, not the one under the cursor when the
+     *  timer woke. Wall seconds convert to song seconds via the playback
+     *  rate (read per frame: the speed slider can move mid-song). */
+    function _lkFrameMidpointTime(clockNow, ringSize, sampleRate, rate) {
+        return clockNow - ((ringSize / 2) / sampleRate) * rate;
+    }
+
+    /** The ONE calibration applied on top of midpoint dating: the user's mic
+     *  timing offset (signed wall ms; positive = attribute singing earlier).
+     *  It moves scoring and the sung trace — never playback. */
+    function _lkApplyMicOffset(t, micOffsetMs, rate) {
+        return t - (micOffsetMs / 1000) * rate;
+    }
+
+    function _lkClampNumber(value, lo, hi, dflt) {
+        const n = typeof value === 'number' ? value : parseFloat(value);
+        if (!isFinite(n)) return dflt;
+        return Math.min(hi, Math.max(lo, n));
+    }
+
+    /** Scoring settings, clamped. The manifest's ranges are narrower (the
+     *  host's slider bounds); these bounds only reject garbage from storage
+     *  or a peer without silently rewriting a legal value. */
+    function _lkNormalizeScoringSettings(raw) {
+        const r = raw || {};
+        return {
+            tolerance: _lkClampNumber(r.tolerance, 0.25, 3, 1),
+            octaveIndependent: r.octaveIndependent === true || r.octaveIndependent === '1'
+                || r.octaveIndependent === 'true',
+            micOffsetMs: _lkClampNumber(r.micOffsetMs, -1000, 1000, 0),
+        };
+    }
+
+    function _lkNormalizeChannel(ch) {
+        const s = String(ch == null ? '' : ch);
+        return _LK_MIC_CHANNELS.indexOf(s) >= 0 ? s : 'mix';
+    }
+
+    /** Pick the capture channel from an AudioBuffer-like input. 'mix'
+     *  averages the first two channels into the caller's preallocated
+     *  `mixBuf` (no per-frame allocation); a mono device ignores the
+     *  channel choice rather than going silent. */
+    function _lkSelectChannel(inputBuffer, channel, mixBuf) {
+        const nCh = inputBuffer.numberOfChannels || 1;
+        if (nCh < 2) return inputBuffer.getChannelData(0);
+        if (channel === '1') return inputBuffer.getChannelData(0);
+        if (channel === '2') return inputBuffer.getChannelData(1);
+        const a = inputBuffer.getChannelData(0);
+        const b = inputBuffer.getChannelData(1);
+        const out = (mixBuf && mixBuf.length >= a.length) ? mixBuf : new Float32Array(a.length);
+        for (let i = 0; i < a.length; i++) out[i] = (a[i] + b[i]) / 2;
+        return out.length === a.length ? out : out.subarray(0, a.length);
+    }
+
+    /** Engine preferences, persisted as ONE versioned JSON document under the
+     *  `lyrics_karaoke.*` namespace (#10):
+     *    { v: 1, deviceId, channel, tolerance, octaveIndependent, micOffsetMs }
+     *  Device and channel are properties of the single microphone, so they
+     *  live here only. The three scoring keys are also per-panel viz
+     *  settings (host-persisted, feedBack#849); the copy here is the default
+     *  a new panel and the legacy overlay start from.
+     *
+     *  Migration, run once when the document is absent: the legacy overlay
+     *  persisted only `lyrics_karaoke.micFeedback` — an on/off bit it keeps
+     *  owning, unchanged, so there is nothing of ours to migrate (#10). The
+     *  compatible legacy values are Karaoke Highway's `vocals_highway.*`
+     *  keys, whose meanings are identical, so a user moving over keeps their
+     *  calibration and input choice. Its `micOn` bit is deliberately NOT
+     *  carried: the microphone only starts on an explicit click. */
+    function _lkLoadPrefs(storage) {
+        const get = (k) => {
+            try { return storage ? storage.getItem(k) : null; } catch (_) { return null; }
+        };
+        let doc = null;
+        const raw = get(_LK_PREFS_KEY);
+        if (raw) {
+            try { doc = JSON.parse(raw); } catch (_) { doc = null; }
+        }
+        let migrated = false;
+        if (!doc || typeof doc !== 'object') {
+            doc = {};
+            const kh = (k) => get('vocals_highway.' + k);
+            if (kh('tolerance') !== null) { doc.tolerance = kh('tolerance'); migrated = true; }
+            if (kh('octaveIndependent') !== null) { doc.octaveIndependent = kh('octaveIndependent'); migrated = true; }
+            if (kh('micOffsetMs') !== null) { doc.micOffsetMs = kh('micOffsetMs'); migrated = true; }
+            if (kh('micChannel') !== null) { doc.channel = kh('micChannel'); migrated = true; }
+            if (kh('micDeviceId') !== null) { doc.deviceId = kh('micDeviceId'); migrated = true; }
+        }
+        const prefs = Object.assign(
+            { v: 1, deviceId: typeof doc.deviceId === 'string' ? doc.deviceId : '' },
+            { channel: _lkNormalizeChannel(doc.channel) },
+            _lkNormalizeScoringSettings(doc),
+        );
+        return { prefs, migrated };
+    }
+
+    function _lkSavePrefs(storage, prefs) {
+        try { if (storage) storage.setItem(_LK_PREFS_KEY, JSON.stringify(prefs)); } catch (_) { /* noop */ }
+    }
+
+    /** Per-owner scoring state. Tokens are the canonical playback shape
+     *  (`{start, duration, midi}`, start-sorted, index-aligned with the
+     *  caller's list); a syllable with `midi === null` is lyric-only and is
+     *  never judged.
+     *
+     *  Everything is driven by `ingest(frame)`, called once per 50 ms mic
+     *  frame — voiced or not — in one time domain: the frame's midpoint
+     *  time shifted by the mic offset. Syllables are finalized from that
+     *  same clock, so a positive calibration can't finalize a syllable
+     *  before its late-arriving frames land. */
+    function _lkCreateVocalScorer(initialSettings) {
+        const settings = _lkNormalizeScoringSettings(initialSettings);
+        let tokens = [];
+        let maxDuration = 0;
+        const results = new Map();   // tokenIndex → {samplesIn, samplesMatched, accuracy, quality}
+        const trace = [];            // [{t, midi}] offset-shifted sung pitch history
+        let lastT = -Infinity;       // last ingested (offset-shifted) frame time
+        let lastRate = 1;
+        let activeSince = -Infinity; // syllables starting earlier are unjudged
+        let cursor = 0;              // finalize cursor into start-sorted tokens
+        let lastSample = null;       // {t, midi, wallAt}
+        let score = 0;
+        let streak = 0;
+        let bestStreak = 0;
+        let hits = 0;
+        let misses = 0;
+        let samplesIn = 0;
+        let samplesMatched = 0;
+
+        function reset() {
+            results.clear();
+            trace.length = 0;
+            lastT = -Infinity;
+            activeSince = -Infinity;
+            cursor = 0;
+            lastSample = null;
+            score = 0;
+            streak = 0;
+            bestStreak = 0;
+            hits = 0;
+            misses = 0;
+            samplesIn = 0;
+            samplesMatched = 0;
+        }
+
+        function activeIndex(t) {
+            // Latest-starting pitched syllable whose [start, end) contains t,
+            // so an overlapping next syllable beats the previous one's tail.
+            // Binary search to the first token starting after t, then walk
+            // back no further than the song's longest syllable.
+            let lo = 0;
+            let hi = tokens.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >>> 1;
+                if (tokens[mid].start <= t) lo = mid + 1;
+                else hi = mid;
+            }
+            for (let i = lo - 1; i >= 0; i--) {
+                const tok = tokens[i];
+                if (tok.start < t - maxDuration) break;
+                if (tok.midi === null) continue;
+                if (t < tok.start + tok.duration) return i;
+            }
+            return -1;
+        }
+
+        function judge(i) {
+            let entry = results.get(i);
+            if (!entry) {
+                entry = { samplesIn: 0, samplesMatched: 0, accuracy: 0, quality: null };
+                results.set(i, entry);
+            }
+            const acc = entry.accuracy;
+            const hit = entry.samplesIn > 0 && acc >= _LK_HIT_ACCURACY;
+            if (hit) {
+                entry.quality = acc >= _LK_PERFECT_ACCURACY ? 'perfect' : 'good';
+                hits += 1;
+                streak += 1;
+                if (streak > bestStreak) bestStreak = streak;
+                const mult = 1 + Math.min(30, streak) * 0.1;
+                score += Math.round(100 * acc * mult);
+            } else {
+                entry.quality = 'miss';
+                misses += 1;
+                streak = 0;
+                score += Math.round(50 * acc);
+            }
+        }
+
+        function finalizeUpTo(t) {
+            while (cursor < tokens.length) {
+                const tok = tokens[cursor];
+                if (tok.start + tok.duration > t) break;
+                const i = cursor++;
+                if (tok.midi === null || tok.start < activeSince) continue;
+                judge(i);
+            }
+        }
+
+        return {
+            reset,
+            setTokens(list) {
+                tokens = Array.isArray(list) ? list : [];
+                maxDuration = 0;
+                for (const tok of tokens) {
+                    if (tok.duration > maxDuration) maxDuration = tok.duration;
+                }
+                reset();
+            },
+            setSettings(next) {
+                const n = _lkNormalizeScoringSettings(Object.assign({}, settings, next));
+                // A live offset change shifts the next frame's time by the
+                // same amount; move the gate's reference in step so a big
+                // backward nudge can't read as a rewind and wipe the take.
+                if (n.micOffsetMs !== settings.micOffsetMs && lastT > -Infinity) {
+                    const shift = ((n.micOffsetMs - settings.micOffsetMs) / 1000) * lastRate;
+                    lastT -= shift;
+                }
+                Object.assign(settings, n);
+            },
+            getSettings() { return Object.assign({}, settings); },
+            /** @returns {boolean} whether the frame advanced the transport. */
+            ingest(frame) {
+                if (!frame || typeof frame.t !== 'number' || !isFinite(frame.t)) return false;
+                const rate = (typeof frame.rate === 'number' && frame.rate > 0) ? frame.rate : 1;
+                lastRate = rate;
+                const t = _lkApplyMicOffset(frame.t, settings.micOffsetMs, rate);
+                if (lastT > -Infinity) {
+                    const delta = t - lastT;
+                    if (delta < -_LK_SEEK_BACK_S) reset();
+                    else if (delta < 1e-3) return false;   // paused / micro-backstep
+                    else if (delta > _LK_SEEK_FORWARD_S) {
+                        // Skip forward: leave the jumped-over syllables unjudged.
+                        activeSince = t;
+                        finalizeUpTo(t);
+                    }
+                }
+                if (lastT === -Infinity) activeSince = t;
+                lastT = t;
+                finalizeUpTo(t);
+
+                const midi = frame.midi;
+                if (typeof midi !== 'number' || !isFinite(midi)) return true;
+                trace.push({ t, midi });
+                if (trace.length > _LK_TRACE_CAP) trace.shift();
+                lastSample = { t, midi, wallAt: frame.wallAt };
+
+                const idx = activeIndex(t);
+                if (idx < 0) return true;
+                let entry = results.get(idx);
+                if (!entry) {
+                    entry = { samplesIn: 0, samplesMatched: 0, accuracy: 0, quality: null };
+                    results.set(idx, entry);
+                }
+                if (entry.quality !== null) return true;   // already judged
+                const matched = _lkPitchMatches(midi, tokens[idx].midi,
+                    settings.tolerance, settings.octaveIndependent);
+                entry.samplesIn += 1;
+                samplesIn += 1;
+                if (matched) {
+                    entry.samplesMatched += 1;
+                    samplesMatched += 1;
+                }
+                entry.accuracy = entry.samplesMatched / entry.samplesIn;
+                return true;
+            },
+            /** Judge everything that ended by `t` (song end: no more frames). */
+            finalizeUpTo(t) {
+                if (typeof t === 'number' && !Number.isNaN(t)) finalizeUpTo(t);
+            },
+            resultFor(i) { return results.get(i) || null; },
+            hasResults() { return results.size > 0; },
+            trace() { return trace; },
+            lastSample() { return lastSample; },
+            stats() {
+                return {
+                    score,
+                    streak,
+                    bestStreak,
+                    hits,
+                    misses,
+                    judged: hits + misses,
+                    accuracy: samplesIn > 0 ? samplesMatched / samplesIn : null,
+                };
+            },
+        };
+    }
+
+    function _lkMicErrorMessage(e) {
+        const name = e && e.name;
+        if (name === 'NotAllowedError' || name === 'SecurityError') return 'Microphone permission was denied.';
+        if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No microphone was found.';
+        if (name === 'NotReadableError' || name === 'AbortError') return 'The microphone is in use or unavailable.';
+        return (e && e.message) || 'Microphone unavailable';
+    }
+
+    /** The single microphone. `env` is injectable so tests can drive the
+     *  whole lifecycle — permission, device loss, teardown — against fakes.
+     *
+     *  Owner: `{ id, getClock() → song seconds, onFrame(frame) }`.
+     *  Frame: `{ t, midi|null, confidence, rate, wallAt }`, `t` dated at the
+     *  buffer midpoint on the OWNER's clock (splitscreen panels run their
+     *  own). The mic offset is the scorer's business, not the mic's.
+     *
+     *  Privacy: getUserMedia runs only inside `start()`, which callers wire
+     *  to an explicit click; audio stays in the tab — only the detected
+     *  pitch leaves the frame pump, and nothing is stored or sent. Every
+     *  track is stopped on stop/destroy/device loss, and a failure is
+     *  surfaced once — never retried in a loop. */
+    function _lkCreateMicController(env) {
+        let state = 'off';           // off | requesting | listening | suspended | error
+        let errorMsg = '';
+        let owner = null;
+        let session = 0;
+        let stream = null;
+        let ctx = null;
+        let sourceNode = null;
+        let processor = null;
+        let sink = null;
+        let timer = null;
+        let managedSource = false;
+        let deviceId = env.prefs.get().deviceId || '';
+        let channel = _lkNormalizeChannel(env.prefs.get().channel);
+        const listeners = new Set();
+
+        // Frame pump buffers, sized at start (depends on the sample rate).
+        let ring = null;
+        let pending = null;
+        let mixBuf = null;
+        let ringCount = 0;
+        let pendingReady = false;
+        let pendingAt = -Infinity;
+        let pendingRate = 1;
+        let sampleRate = 0;
+
+        function snapshot() {
+            return { state, error: errorMsg, ownerId: owner ? owner.id : null, deviceId, channel };
+        }
+
+        function notify() {
+            const snap = snapshot();
+            listeners.forEach((fn) => {
+                try { fn(snap); } catch (_) { /* a listener never breaks the mic */ }
+            });
+        }
+
+        function caps() {
+            try { return env.caps ? env.caps() : null; } catch (_) { return null; }
+        }
+
+        function capsCommand(command, payload) {
+            const c = caps();
+            if (!c) return;
+            try {
+                Promise.resolve(c.command('audio-input', command, {
+                    requester: 'lyrics_karaoke',
+                    source: 'lyrics_karaoke',
+                    origin: 'system',
+                    reason: 'Lyrics Karaoke microphone ' + command,
+                    payload,
+                })).catch(() => {});
+            } catch (_) { /* degrade to a no-op on hosts without the domain */ }
+        }
+
+        function registerManagedSource() {
+            // Advisory: makes the mic a visible managed input on hosts with
+            // the audio-input domain. We still capture frames ourselves.
+            managedSource = true;
+            capsCommand('register-source', {
+                version: 1,
+                providerId: 'lyrics_karaoke',
+                ownerPluginId: 'lyrics_karaoke',
+                sourceId: _LK_MANAGED_SOURCE_ID,
+                logicalSourceKey: _LK_MANAGED_SOURCE_ID,
+                label: 'Karaoke microphone',
+                labelSafe: true,
+                kind: 'microphone',
+                channelShape: 'mono',
+                availability: 'available',
+            });
+        }
+
+        function unregisterManagedSource() {
+            if (!managedSource) return;
+            managedSource = false;
+            capsCommand('unregister-source', {
+                providerId: 'lyrics_karaoke',
+                sourceId: _LK_MANAGED_SOURCE_ID,
+            });
+        }
+
+        function stopTracks(s) {
+            if (!s) return;
+            try { s.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* noop */ } }); } catch (_) { /* noop */ }
+        }
+
+        function closeCtx(c) {
+            if (!c) return;
+            try { const p = c.close(); if (p && p.catch) p.catch(() => {}); } catch (_) { /* noop */ }
+        }
+
+        function stopTimer() {
+            if (timer !== null) { env.clearInterval(timer); timer = null; }
+        }
+
+        function startTimer(s) {
+            stopTimer();
+            timer = env.setInterval(() => {
+                if (!pendingReady || s !== session || state !== 'listening') return;
+                pendingReady = false;
+                const det = _lkDetectMidi(pending, sampleRate);
+                const frame = {
+                    t: pendingAt,
+                    midi: det ? det.midi : null,
+                    confidence: det ? det.confidence : 0,
+                    rate: pendingRate,
+                    wallAt: env.now(),
+                };
+                if (owner) {
+                    try { owner.onFrame(frame); } catch (_) { /* owner bug must not kill the pump */ }
+                }
+            }, _LK_FRAME_INTERVAL_MS);
+        }
+
+        /** Release every resource. Leaves state/owner to the caller. */
+        function teardown() {
+            session += 1;   // any in-flight permission prompt / frame is stale
+            stopTimer();
+            if (processor) {
+                try { processor.disconnect(); } catch (_) { /* noop */ }
+                processor.onaudioprocess = null;
+                processor = null;
+            }
+            if (sourceNode) {
+                try { sourceNode.disconnect(); } catch (_) { /* noop */ }
+                sourceNode = null;
+            }
+            if (sink) {
+                try { sink.disconnect(); } catch (_) { /* noop */ }
+                sink = null;
+            }
+            stopTracks(stream);
+            stream = null;
+            closeCtx(ctx);
+            ctx = null;
+            ring = null;
+            pending = null;
+            mixBuf = null;
+            ringCount = 0;
+            pendingReady = false;
+            pendingAt = -Infinity;
+            unregisterManagedSource();
+        }
+
+        function isActive() {
+            return state === 'requesting' || state === 'listening' || state === 'suspended';
+        }
+
+        async function start(nextOwner) {
+            if (!nextOwner || typeof nextOwner.onFrame !== 'function') return false;
+            if (isActive()) {
+                // Exclusive: a different owner never shares or steals the mic.
+                return owner === nextOwner;
+            }
+            owner = nextOwner;
+            state = 'requesting';
+            errorMsg = '';
+            notify();
+
+            const s = ++session;
+            let pendingStream = null;
+            let pendingCtx = null;
+            try {
+                const nav = env.navigator();
+                if (!nav || !nav.mediaDevices || typeof nav.mediaDevices.getUserMedia !== 'function') {
+                    throw new Error(env.insecureContext()
+                        ? 'Microphone access requires HTTPS (or localhost).'
+                        : 'Microphone access is not available in this browser.');
+                }
+                // Create + resume the AudioContext BEFORE awaiting
+                // getUserMedia so the click's user activation is still valid
+                // when Safari/iOS evaluates resume().
+                pendingCtx = env.createAudioContext();
+                if (!pendingCtx) throw new Error('Web Audio is not available in this browser.');
+                if (pendingCtx.state === 'suspended') {
+                    try { await pendingCtx.resume(); } catch (_) {
+                        throw new Error('Audio could not start. Click 🎤 again.');
+                    }
+                    if (pendingCtx.state === 'suspended') {
+                        throw new Error('Audio is suspended. Click 🎤 again.');
+                    }
+                }
+                // Ask for stereo so an interface presenting one stereo device
+                // (ch1 guitar / ch2 mic) can be channel-addressed; mono
+                // devices still work.
+                const audio = {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    channelCount: { ideal: 2 },
+                };
+                const wanted = deviceId;
+                if (wanted) audio.deviceId = { exact: wanted };
+                try {
+                    pendingStream = await nav.mediaDevices.getUserMedia({ audio });
+                } catch (e) {
+                    // The saved device was unplugged or renumbered: fall back
+                    // to the default input ONCE rather than failing outright.
+                    const gone = e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError');
+                    if (!wanted || !gone || s !== session) throw e;
+                    delete audio.deviceId;
+                    pendingStream = await nav.mediaDevices.getUserMedia({ audio });
+                }
+                if (s !== session) {
+                    // Stopped while the permission prompt was open.
+                    stopTracks(pendingStream);
+                    closeCtx(pendingCtx);
+                    return false;
+                }
+                stream = pendingStream;
+                ctx = pendingCtx;
+                pendingStream = null;
+                pendingCtx = null;
+                sampleRate = ctx.sampleRate;
+                // The ring must cover 2*tauMax samples so YIN can search down
+                // to the vocal floor at any sample rate (192 kHz needs 7680).
+                const ringSize = Math.max(_LK_YIN_MIN_SAMPLES, 2 * Math.ceil(sampleRate / _LK_YIN_MIN_HZ));
+                ring = new Float32Array(ringSize);
+                pending = new Float32Array(ringSize);
+                mixBuf = new Float32Array(_LK_YIN_FRAME_SIZE);
+                ringCount = 0;
+                pendingReady = false;
+
+                sourceNode = ctx.createMediaStreamSource(stream);
+                processor = ctx.createScriptProcessor(_LK_YIN_FRAME_SIZE, 2, 1);
+                processor.onaudioprocess = (e) => {
+                    if (s !== session || state !== 'listening') return;
+                    const input = _lkSelectChannel(e.inputBuffer, channel, mixBuf);
+                    const n = input.length;
+                    ring.copyWithin(0, n);           // slide left in place
+                    ring.set(input, ringSize - n);   // new frame fills the tail
+                    ringCount += n;
+                    if (ringCount >= ringSize && owner) {
+                        pending.set(ring);
+                        pendingRate = env.getPlaybackRate();
+                        pendingAt = _lkFrameMidpointTime(owner.getClock(), ringSize, sampleRate, pendingRate);
+                        pendingReady = true;
+                    }
+                };
+                sourceNode.connect(processor);
+                // ScriptProcessor needs a sink to pump; a zero-gain node
+                // avoids feeding the mic back to the speakers.
+                sink = ctx.createGain();
+                sink.gain.value = 0;
+                processor.connect(sink);
+                sink.connect(ctx.destination);
+
+                // Device loss: surface it once and release everything.
+                stream.getTracks().forEach((track) => {
+                    if (track && typeof track.addEventListener === 'function') {
+                        track.addEventListener('ended', () => {
+                            if (s !== session) return;
+                            teardown();
+                            state = 'error';
+                            errorMsg = 'The microphone was disconnected.';
+                            notify();
+                        });
+                    }
+                });
+
+                state = 'listening';
+                startTimer(s);
+                registerManagedSource();
+                notify();
+                return true;
+            } catch (e) {
+                stopTracks(pendingStream);
+                closeCtx(pendingCtx);
+                if (s !== session) return false;   // superseded — not an error
+                teardown();
+                state = 'error';
+                errorMsg = _lkMicErrorMessage(e);
+                notify();
+                return false;
+            }
+        }
+
+        function stop() {
+            const had = state !== 'off' || owner !== null;
+            teardown();
+            owner = null;
+            state = 'off';
+            errorMsg = '';
+            if (had) notify();
+        }
+
+        return {
+            start,
+            stop,
+            /** Stop only if `who` holds the mic; returns whether it did. */
+            release(who) {
+                if (!who || owner !== who) return false;
+                stop();
+                return true;
+            },
+            /** Pause frame processing, keeping the device open (screen hidden). */
+            suspend() {
+                if (state !== 'listening') return false;
+                stopTimer();
+                pendingReady = false;
+                if (ctx && typeof ctx.suspend === 'function') {
+                    try { const p = ctx.suspend(); if (p && p.catch) p.catch(() => {}); } catch (_) { /* noop */ }
+                }
+                state = 'suspended';
+                notify();
+                return true;
+            },
+            resume() {
+                if (state !== 'suspended') return false;
+                if (ctx && typeof ctx.resume === 'function') {
+                    try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (_) { /* noop */ }
+                }
+                state = 'listening';
+                startTimer(session);
+                notify();
+                return true;
+            },
+            destroy() {
+                stop();
+                listeners.clear();
+            },
+            /** Switch input device; restarts a live stream on the new device
+             *  (callers wire this to the picker's change — a user action). */
+            async setDevice(id) {
+                const next = typeof id === 'string' ? id : '';
+                if (next === deviceId) return true;
+                deviceId = next;
+                env.prefs.set({ deviceId: next });
+                if (!isActive() || !owner) { notify(); return true; }
+                const o = owner;
+                teardown();
+                state = 'off';
+                owner = null;
+                return start(o);
+            },
+            /** Switch capture channel; applied to the very next buffer. */
+            setChannel(ch) {
+                channel = _lkNormalizeChannel(ch);
+                env.prefs.set({ channel });
+                notify();
+            },
+            async listDevices() {
+                const nav = env.navigator();
+                if (!nav || !nav.mediaDevices || typeof nav.mediaDevices.enumerateDevices !== 'function') return [];
+                let devices = [];
+                try { devices = await nav.mediaDevices.enumerateDevices(); } catch (_) { return []; }
+                return devices
+                    .filter((d) => d && d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default')
+                    .map((d, i) => ({ deviceId: d.deviceId, label: d.label || ('Microphone ' + (i + 1)) }));
+            },
+            getState: snapshot,
+            isOwnedBy(who) { return !!who && owner === who && state !== 'off'; },
+            subscribe(fn) {
+                listeners.add(fn);
+                return () => listeners.delete(fn);
+            },
+        };
+    }
+
+    // Module-level engine singletons. Screen.js may be re-executed on plugin
+    // reload; the mic is parked on window so a second evaluation reuses the
+    // live controller instead of creating a second one that could open a
+    // second stream (the first run's controller would otherwise be orphaned
+    // still holding the device).
+    const _lkPrefsState = _lkLoadPrefs(typeof localStorage !== 'undefined' ? localStorage : null);
+    const _lkPrefs = _lkPrefsState.prefs;
+    if (_lkPrefsState.migrated) _lkSavePrefs(typeof localStorage !== 'undefined' ? localStorage : null, _lkPrefs);
+
+    function _lkUpdatePrefs(patch) {
+        let changed = false;
+        for (const k of Object.keys(patch)) {
+            if (_lkPrefs[k] !== patch[k]) { _lkPrefs[k] = patch[k]; changed = true; }
+        }
+        if (!changed) return;
+        _lkSavePrefs(typeof localStorage !== 'undefined' ? localStorage : null, _lkPrefs);
+        // The overlay has no settings surface of its own; it scores with
+        // the engine defaults, so it follows them live.
+        _lkOverlayScorer.setSettings(_lkPrefs);
+    }
+
+    function _lkDefaultMicEnv() {
+        return {
+            navigator: () => (typeof navigator !== 'undefined' ? navigator : null),
+            insecureContext: () => typeof location !== 'undefined'
+                && location.protocol === 'http:'
+                && location.hostname !== 'localhost'
+                && location.hostname !== '127.0.0.1',
+            createAudioContext: () => {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                return AC ? new AC() : null;
+            },
+            setInterval: (fn, ms) => setInterval(fn, ms),
+            clearInterval: (id) => clearInterval(id),
+            now: () => _wallNow(),
+            getPlaybackRate: () => getPlaybackRate(),
+            prefs: { get: () => _lkPrefs, set: (patch) => _lkUpdatePrefs(patch) },
+            caps: () => {
+                const c = window.feedBack && window.feedBack.capabilities;
+                return (c && c.version === 1 && typeof c.command === 'function') ? c : null;
+            },
+        };
+    }
+
+    const _LK_MIC_KEY = '__feedBackLyricsKaraokeMic';
+    const _lkMic = window[_LK_MIC_KEY] || (window[_LK_MIC_KEY] = _lkCreateMicController(_lkDefaultMicEnv()));
 
     function _wallNow() {
         return (typeof performance !== 'undefined' && performance.now)
@@ -853,6 +1599,59 @@
         return 1.0;
     }
 
+    // ── Legacy overlay: mic feedback over the shared engine ────────────
+
+    let micBtn = null;
+    let micPill = null;
+    let micPillLastText = '';            // last text written to micPill; avoids per-frame DOM writes
+    // Session-scoped intent: "the user enabled mic for THIS song." Used
+    // to auto-restore the mic when karaoke is toggled off and back on
+    // for the same song without spilling that intent across songs (a
+    // resetForNewSong clears it). The persisted localStorage flag is
+    // separate and serves a future "remember on reload" surface.
+    let micWantOnForSong = false;
+
+    // The overlay's scorer and its microphone-owner identity. Tokens are
+    // index-aligned with pitchData.tokens (see _lkOverlaySyncTokens) so the
+    // overlay can look results up by its own token index.
+    const _lkOverlayScorer = _lkCreateVocalScorer(_lkPrefs);
+    let userDisplayMidi = null;       // smoothed value used for the pitch line + pill
+    const _lkOverlayOwner = {
+        id: 'overlay',
+        getClock: () => getNow(),
+        onFrame: (frame) => { _lkOverlayScorer.ingest(frame); },
+    };
+
+    /** Overlay view of the shared mic: 'off' unless the OVERLAY owns it. */
+    function overlayMicState() {
+        const s = _lkMic.getState();
+        return s.ownerId === _lkOverlayOwner.id ? s.state : 'off';
+    }
+
+    // pitchData.tokens index → scorer index. The scorer needs start-sorted
+    // tokens and /data doesn't promise an order, so it gets a sorted copy.
+    let _lkOverlayIndex = [];
+
+    function _lkOverlaySyncTokens() {
+        const src = (pitchData && Array.isArray(pitchData.tokens)) ? pitchData.tokens : [];
+        const rows = src.map((tok, i) => ({
+            i,
+            start: (tok && typeof tok.t === 'number' && isFinite(tok.t)) ? tok.t : Infinity,
+            duration: (tok && typeof tok.d === 'number' && tok.d > 0) ? tok.d : 0,
+            midi: (tok && typeof tok.midi === 'number' && isFinite(tok.midi)) ? tok.midi : null,
+        }));
+        rows.sort((a, b) => (a.start - b.start) || (a.i - b.i));
+        _lkOverlayIndex = new Array(rows.length);
+        rows.forEach((row, sortedIdx) => { _lkOverlayIndex[row.i] = sortedIdx; });
+        _lkOverlayScorer.setTokens(rows);
+        userDisplayMidi = null;
+    }
+
+    function _lkOverlayResultFor(tokenIdx) {
+        const i = _lkOverlayIndex[tokenIdx];
+        return i === undefined ? null : _lkOverlayScorer.resultFor(i);
+    }
+
     function songHasMidi() {
         if (!pitchData || !Array.isArray(pitchData.tokens)) return false;
         for (const t of pitchData.tokens) {
@@ -862,254 +1661,36 @@
     }
 
     function resetUserResults() {
-        userPitchSamples.length = 0;
-        userResults.clear();
+        _lkOverlayScorer.reset();
         userDisplayMidi = null;
-        userLastSampleWallAt = -Infinity;
-        // Also drop the transport-tracking cursor so the next frame
-        // doesn't compare against a stale previous time.
-        micLastCapturedAt = -Infinity;
-    }
-
-    function findActiveTokenIndex(time) {
-        // Latest-starting token whose [t, t+d) contains `time` wins, so an
-        // overlapping next-syllable claim takes priority over the trailing
-        // tail of the previous one. Linear scan is fine — token counts
-        // are typically a few hundred per song.
-        if (!pitchData || !Array.isArray(pitchData.tokens)) return -1;
-        let bestIdx = -1;
-        let bestStart = -Infinity;
-        for (let i = 0; i < pitchData.tokens.length; i++) {
-            const tok = pitchData.tokens[i];
-            if (!tok || typeof tok.t !== 'number' || typeof tok.midi !== 'number') continue;
-            const t0 = tok.t;
-            const t1 = t0 + (tok.d || 0);
-            if (time < t0 || time >= t1) continue;
-            if (t0 > bestStart) { bestStart = t0; bestIdx = i; }
-        }
-        return bestIdx;
-    }
-
-    function processYinFrame(buffer, sampleRate, capturedAt, sessionAtCapture) {
-        if (sessionAtCapture !== micSessionGen) return;  // stop happened mid-frame
-
-        // Transport awareness. If the playhead jumped backward (replay,
-        // seek-back), wipe the bookkeeping so old scores don't resurrect
-        // on the new pass. If the playhead didn't advance at all
-        // (paused), drop the sample — otherwise samplesIn for whatever
-        // token sits under the cursor would inflate forever, dragging
-        // accuracy toward 0/1 with no real input.
-        if (micLastCapturedAt > -Infinity) {
-            const delta = capturedAt - micLastCapturedAt;
-            if (delta < 0) {
-                resetUserResults();
-            } else if (delta < 1e-3) {
-                return;
-            }
-        }
-        micLastCapturedAt = capturedAt;
-
-        const r = yinDetect(buffer, sampleRate, _LK_YIN_MIN_HZ);
-        if (!r || r.freq <= 0 || r.confidence < _LK_YIN_CONFIDENCE) return;
-        if (r.freq < _LK_YIN_MIN_HZ || r.freq > _LK_YIN_MAX_HZ) return;
-        const midi = freqToMidi(r.freq);
-        if (!isFinite(midi)) return;
-
-        userPitchSamples.push({ t: capturedAt, midi, confidence: r.confidence });
-        if (userPitchSamples.length > _LK_SAMPLE_RING_CAP) userPitchSamples.shift();
-        userLastSampleWallAt = _wallNow();
-
-        const idx = findActiveTokenIndex(capturedAt);
-        if (idx < 0) return;
-        const tok = pitchData.tokens[idx];
-        let entry = userResults.get(idx);
-        if (!entry) {
-            entry = { samplesIn: 0, samplesMatched: 0, accuracy: 0 };
-            userResults.set(idx, entry);
-        }
-        entry.samplesIn += 1;
-        if (Math.abs(midi - tok.midi) <= _LK_MATCH_TOLERANCE) entry.samplesMatched += 1;
-        entry.accuracy = entry.samplesMatched / entry.samplesIn;
     }
 
     async function startMic() {
-        if (micState === 'listening' || micState === 'requesting') return;
-        micState = 'requesting';
-        micErrorMsg = '';
-        refreshMicUi();
-
-        const session = ++micSessionGen;
-        let pendingStream = null;
-        let pendingCtx = null;
-        try {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                const isHttp = location.protocol === 'http:'
-                    && location.hostname !== 'localhost'
-                    && location.hostname !== '127.0.0.1';
-                throw new Error(isHttp
-                    ? 'Microphone access requires HTTPS (or localhost).'
-                    : 'Microphone access is not available in this browser. Try Chrome or Edge.');
-            }
-            // Create + resume the AudioContext BEFORE awaiting
-            // getUserMedia so the original user activation is still
-            // valid when Safari/iOS evaluates resume(). After the
-            // await, activation can be consumed and resume() would
-            // refuse, leaving us silently in 'listening' with no audio.
-            pendingCtx = new (window.AudioContext || window.webkitAudioContext)();
-            if (pendingCtx.state === 'suspended') {
-                try { await pendingCtx.resume(); } catch (e) {
-                    throw new Error('Audio context could not resume. Click 🎤 again.');
-                }
-                if (pendingCtx.state === 'suspended') {
-                    throw new Error('Audio context is suspended. Click 🎤 again.');
-                }
-            }
-            pendingStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false,
-                    channelCount: 1,
-                },
-            });
-            if (session !== micSessionGen) {
-                // Stop happened while the permission prompt was open.
-                pendingStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* noop */ } });
-                try { pendingCtx.close(); } catch (_) { /* noop */ }
-                return;
-            }
-            micStream = pendingStream;
-            micCtx = pendingCtx;
-            micSourceNode = micCtx.createMediaStreamSource(micStream);
-            micProcessor = micCtx.createScriptProcessor(_LK_YIN_FRAME_SIZE, 1, 1);
-            // Preallocate fixed-size buffers to avoid per-frame Float32Array
-            // allocation / GC pressure in the hot onaudioprocess path.
-            // ringSize must cover 2*tauMax samples so yinDetect can search
-            // down to _LK_YIN_MIN_HZ at any sample rate (e.g. 192 kHz needs
-            // 2*⌈192000/50⌉ = 7680 samples, well above _LK_YIN_MIN_SAMPLES).
-            const sampleRate = micCtx.sampleRate;
-            const ringSize = Math.max(_LK_YIN_MIN_SAMPLES,
-                2 * Math.ceil(sampleRate / _LK_YIN_MIN_HZ));
-            micRingBuffer = new Float32Array(ringSize);
-            micPendingBuffer = new Float32Array(ringSize);
-            micRingCount = 0;
-            micPendingReady = false;
-
-            // The captured audio represents the most recent
-            // ringSize frames of mic input — i.e. it spans
-            // [now - bufferDurationWall, now] in wall-clock seconds.
-            // Tag the *midpoint* of that window as the buffer's
-            // representative song time so findActiveTokenIndex scores
-            // against the syllable actually being sung, not the one
-            // under the cursor when the 50 ms timer wakes. Convert
-            // wall-clock to song-time via the current playback rate so
-            // slow/fast practice still maps frames to the correct
-            // syllable (read fresh per frame — the user can scrub the
-            // speed slider mid-song).
-            const midpointWallSec = (ringSize / 2) / sampleRate;
-
-            micProcessor.onaudioprocess = (e) => {
-                if (micState !== 'listening') return;
-                const input = e.inputBuffer.getChannelData(0);
-                const n = input.length;
-                // Slide the ring buffer left by n samples (in-place, no allocation):
-                // copies bytes [n .. ringSize-1] to [0 .. ringSize-n-1],
-                // then the new frame fills the vacated tail.
-                micRingBuffer.copyWithin(0, n);
-                micRingBuffer.set(input, ringSize - n);
-                micRingCount += n;
-                // Only expose a pending snapshot once we have a full window.
-                // After that, every ScriptProcessor callback (~46 ms at
-                // 44100 Hz) produces a fresh snapshot — well within the
-                // 50 ms timer cadence.
-                if (micRingCount >= ringSize) {
-                    micPendingBuffer.set(micRingBuffer);
-                    micPendingBufferAt = getNow() - midpointWallSec * getPlaybackRate();
-                    micPendingSession = session;
-                    micPendingReady = true;
-                }
-            };
-
-            micSourceNode.connect(micProcessor);
-            // ScriptProcessor needs a sink to actually pump audio. Routing
-            // to destination would feed the mic to the speakers; route to
-            // a muted gain node instead so we get callbacks without
-            // creating a feedback loop.
-            const muteSink = micCtx.createGain();
-            muteSink.gain.value = 0;
-            micProcessor.connect(muteSink);
-            muteSink.connect(micCtx.destination);
-
-            micTimer = setInterval(() => {
-                if (!micPendingReady) return;
-                const at = micPendingBufferAt;
-                const sessionAtCapture = micPendingSession;
-                micPendingReady = false;
-                processYinFrame(micPendingBuffer, sampleRate, at, sessionAtCapture);
-            }, 50);
-
-            micState = 'listening';
+        // The provider owns playback: the shared controller would refuse
+        // anyway (it is held by a viz panel or about to be), but bail early
+        // so the overlay never even requests permission behind its back.
+        if (_vizOwnsPlayback()) return;
+        const ok = await _lkMic.start(_lkOverlayOwner);
+        if (ok) {
             micWantOnForSong = true;
             try { localStorage.setItem(_LK_STORAGE_KEY, '1'); } catch (_) { /* noop */ }
-            refreshMicUi();
-        } catch (e) {
-            console.warn('lyrics_karaoke mic start failed', e);
-            micErrorMsg = (e && e.message) || 'Microphone unavailable';
-            // Clean up partial state — we may have created the context
-            // and/or stream before the throw, but they aren't yet
-            // assigned to micCtx/micStream that stopMic operates on.
-            if (pendingStream && pendingStream !== micStream) {
-                try { pendingStream.getTracks().forEach((t) => t.stop()); } catch (_) { /* noop */ }
-            }
-            if (pendingCtx && pendingCtx !== micCtx) {
-                try { pendingCtx.close(); } catch (_) { /* noop */ }
-            }
+        } else if (overlayMicState() === 'error') {
             // Clear both the persisted flag and the per-song intent on
-            // failure. Otherwise a revoked permission or unplugged
-            // input would re-trigger the prompt on every karaoke
-            // toggle (persisted flag) or every karaoke off/on for the
-            // current song (in-memory intent). The user re-clicks 🎤
-            // to retry; a successful start re-sets both flags.
+            // failure. Otherwise a revoked permission or unplugged input
+            // would re-trigger the prompt on every karaoke toggle. The user
+            // re-clicks 🎤 to retry; a successful start re-sets both flags.
             micWantOnForSong = false;
-            stopMic({ keepFlag: false });
-            // stopMic resets to 'off'; re-flag as 'error' so the pill/title
-            // surface why the start failed.
-            micState = 'error';
-            refreshMicUi();
+            try { localStorage.setItem(_LK_STORAGE_KEY, '0'); } catch (_) { /* noop */ }
         }
+        refreshMicUi();
     }
 
     function stopMic(opts) {
         const keepFlag = !!(opts && opts.keepFlag);
-        micSessionGen += 1;  // any in-flight YIN frame becomes stale
-        if (micTimer) { clearInterval(micTimer); micTimer = null; }
-        if (micProcessor) {
-            try { micProcessor.disconnect(); } catch (_) { /* noop */ }
-            micProcessor.onaudioprocess = null;
-            micProcessor = null;
-        }
-        if (micSourceNode) {
-            try { micSourceNode.disconnect(); } catch (_) { /* noop */ }
-            micSourceNode = null;
-        }
-        if (micStream) {
-            try { micStream.getTracks().forEach((t) => t.stop()); } catch (_) { /* noop */ }
-            micStream = null;
-        }
-        if (micCtx) {
-            try { micCtx.close(); } catch (_) { /* noop */ }
-            micCtx = null;
-        }
-        micRingBuffer = null;
-        micRingCount = 0;
-        micPendingBuffer = null;
-        micPendingReady = false;
-        micPendingBufferAt = -Infinity;
-        micLastCapturedAt = -Infinity;
+        _lkMic.release(_lkOverlayOwner);
         if (!keepFlag) {
             try { localStorage.setItem(_LK_STORAGE_KEY, '0'); } catch (_) { /* noop */ }
         }
-        micState = 'off';
         refreshMicUi();
     }
 
@@ -1136,11 +1717,16 @@
 
         micBtn.style.display = 'none';
         micPill.style.display = 'none';
+        // Mirror the shared controller's transitions (requesting, device
+        // loss, errors) into the overlay's button. Subscribed once — the
+        // button itself is created once per page.
+        _lkMic.subscribe(() => refreshMicUi());
     }
 
     async function onMicClick() {
         if (micBtn && micBtn.disabled) return;
-        if (micState === 'listening') {
+        const st = overlayMicState();
+        if (st === 'listening' || st === 'suspended') {
             // User-initiated stop — clear the per-song intent so karaoke
             // off/on for this song doesn't auto-resume a mic the user
             // explicitly turned off.
@@ -1165,7 +1751,13 @@
         micBtn.style.display = '';
         if (micPill) micPill.style.display = '';
 
-        switch (micState) {
+        const shared = _lkMic.getState();
+        // Held by a provider panel — not ours to toggle.
+        const busy = shared.ownerId !== null && shared.ownerId !== _lkOverlayOwner.id
+            && (shared.state === 'requesting' || shared.state === 'listening' || shared.state === 'suspended');
+        const st = busy ? 'busy' : overlayMicState();
+        const lastError = st === 'error' ? shared.error : '';
+        switch (st) {
             case 'requesting':
                 micBtn.disabled = true;
                 micBtn.className = BTN_CLASS_DISABLED;
@@ -1175,6 +1767,7 @@
                 if (micPill) { micPill.textContent = '…'; micPillLastText = '…'; }
                 break;
             case 'listening':
+            case 'suspended':
                 micBtn.disabled = false;
                 micBtn.className = BTN_CLASS_ACTIVE;
                 micBtn.title = 'Stop live mic feedback';
@@ -1183,27 +1776,33 @@
                 micPillLastText = '';
                 // Pill text is set by updateMicPill() each render frame.
                 break;
-            case 'error':
-                micBtn.disabled = false;
-                micBtn.className = BTN_CLASS_PROMPT;
-                micBtn.title = 'Mic feedback error: ' + (micErrorMsg || 'unknown') + ' (click to retry)';
-                micBtn.setAttribute('aria-label', 'Mic error — click to retry');
-                micBtn.setAttribute('aria-pressed', 'false');
-                if (micPill) { micPill.textContent = '!'; micPillLastText = '!'; }
-                break;
-            default:  // 'off'
-                micBtn.disabled = false;
-                micBtn.className = BTN_CLASS_PROMPT;
-                micBtn.title = 'Toggle live mic feedback';
-                micBtn.setAttribute('aria-label', 'Toggle live mic feedback');
+            case 'busy':
+                micBtn.disabled = true;
+                micBtn.className = BTN_CLASS_DISABLED;
+                micBtn.title = 'The microphone is in use by the karaoke visualization';
+                micBtn.setAttribute('aria-label', 'Microphone in use');
                 micBtn.setAttribute('aria-pressed', 'false');
                 if (micPill) { micPill.textContent = ''; micPillLastText = ''; }
+                break;
+            default:
+                micBtn.disabled = false;
+                micBtn.className = BTN_CLASS_PROMPT;
+                micBtn.setAttribute('aria-pressed', 'false');
+                if (lastError) {
+                    micBtn.title = 'Mic feedback error: ' + lastError + ' (click to retry)';
+                    micBtn.setAttribute('aria-label', 'Mic error — click to retry');
+                    if (micPill) { micPill.textContent = '!'; micPillLastText = '!'; }
+                } else {
+                    micBtn.title = 'Toggle live mic feedback';
+                    micBtn.setAttribute('aria-label', 'Toggle live mic feedback');
+                    if (micPill) { micPill.textContent = ''; micPillLastText = ''; }
+                }
                 break;
         }
     }
 
     function updateMicPill() {
-        if (!micPill || micState !== 'listening') return;
+        if (!micPill || overlayMicState() !== 'listening') return;
         const text = (userDisplayMidi == null || !isFinite(userDisplayMidi))
             ? '—'
             : midiToName(userDisplayMidi);
@@ -1233,6 +1832,7 @@
         status = null;
         pitchData = null;
         tokenIndexMap = new Map();
+        _lkOverlaySyncTokens();
         songPitchRange = null;
         // Tear the overlay all the way down so a previous song's bars
         // don't briefly flash for the new song before its data arrives.
@@ -1241,7 +1841,7 @@
         // localStorage on/off bit (a future "remember on reload"
         // surface), but micWantOnForSong is per-song so a one-time
         // opt-in on song A doesn't auto-prompt on song B.
-        if (micState !== 'off') stopMic({ keepFlag: true });
+        if (overlayMicState() !== 'off') stopMic({ keepFlag: true });
         micWantOnForSong = false;
         resetUserResults();
         refreshButtonState();
@@ -1696,6 +2296,7 @@
         if (currentSong && currentSong.filename === filename) {
             pitchData = null;  // force the player overlay to refetch on toggle
             tokenIndexMap = new Map();
+            _lkOverlaySyncTokens();
             await fetchStatus(filename);
             refreshButtonState();
         }
@@ -1833,7 +2434,7 @@
                     // karaoke was on; this catches the rare case where
                     // we leave the player while karaoke was already off
                     // but the mic somehow lingered.
-                    if (micState !== 'off') { stopMic({ keepFlag: true }); resetUserResults(); }
+                    if (overlayMicState() !== 'off') { stopMic({ keepFlag: true }); resetUserResults(); }
                 }
                 if (name === 'plugin-lyrics_karaoke') {
                     onSetupScreenShown();
@@ -1879,6 +2480,240 @@
     // `_createVizRenderer`'s closure — a shared module global would make
     // two splitscreen panels overwrite each other.
     const _vizInstances = new Set();
+
+    let _vizOwnerSeq = 0;             // unique mic-owner ids per renderer instance
+
+    function _vizEngineScoringDefaults() {
+        return {
+            tolerance: _lkPrefs.tolerance,
+            octaveIndependent: _lkPrefs.octaveIndependent,
+            micOffsetMs: _lkPrefs.micOffsetMs,
+        };
+    }
+
+    // ── Shared microphone control (#11) ─────────────────────────────────
+    //
+    // ONE control for the ONE microphone, however many panels are live:
+    // 🎤 toggle + input device + capture channel + a live status readout.
+    // Mounted in v3's always-reachable plugin slot (docs/plugin-v3-ui.md),
+    // falling back to #player-controls. Built only while a provider
+    // instance is live and at least one wants mic feedback.
+    //
+    // The 🎤 click is the ONLY path to getUserMedia on the provider side —
+    // nothing requests the microphone on load, on song change, or from a
+    // restored setting. Until #16's per-panel arbitration lands, the mic
+    // scores the first live panel that can score.
+    let _vizMicUi = null;
+
+    function _vizMicTarget() {
+        for (const inst of _vizInstances) {
+            if (inst.canScore()) return inst;
+        }
+        return null;
+    }
+
+    function _vizMicOwnerInstance() {
+        for (const inst of _vizInstances) {
+            if (inst.ownsMic()) return inst;
+        }
+        return null;
+    }
+
+    function _vizMicSlot() {
+        const ui = window.feedBack && window.feedBack.ui;
+        if (ui && typeof ui.playerControlSlot === 'function') {
+            try {
+                const slot = ui.playerControlSlot();
+                if (slot) return slot;
+            } catch (_) { /* fall through to the legacy bar */ }
+        }
+        return (typeof document !== 'undefined' && document.getElementById)
+            ? document.getElementById('player-controls')
+            : null;
+    }
+
+    function _vizRemoveMicUi() {
+        if (!_vizMicUi) return;
+        if (_vizMicUi.unsubscribe) _vizMicUi.unsubscribe();
+        const root = _vizMicUi.root;
+        if (root && root.parentNode) root.parentNode.removeChild(root);
+        _vizMicUi = null;
+    }
+
+    function _vizBuildMicUi(slot) {
+        const root = document.createElement('span');
+        root.id = 'lk-viz-mic';
+        root.style.display = 'inline-flex';
+        root.style.alignItems = 'center';
+        root.style.gap = '4px';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = '🎤';
+        btn.addEventListener('click', _vizOnMicClick);
+
+        const selectStyle = 'font-size:11px;max-width:9rem;background:#1f2937;color:#e5e7eb;'
+            + 'border:1px solid #374151;border-radius:4px;padding:1px 2px;';
+        const device = document.createElement('select');
+        device.setAttribute('aria-label', 'Karaoke microphone input');
+        device.title = 'Microphone input';
+        device.setAttribute('style', selectStyle);
+        device.addEventListener('change', () => {
+            _lkMic.setDevice(device.value).then(() => _vizRefreshMicUi());
+        });
+
+        const channel = document.createElement('select');
+        channel.setAttribute('aria-label', 'Karaoke microphone channel');
+        channel.title = 'Which capture channel carries the mic on a multi-input interface';
+        channel.setAttribute('style', selectStyle);
+        [['mix', 'Mix'], ['1', 'Ch 1'], ['2', 'Ch 2']].forEach(([v, label]) => {
+            const opt = document.createElement('option');
+            opt.value = v;
+            opt.textContent = label;
+            channel.appendChild(opt);
+        });
+        channel.addEventListener('change', () => _lkMic.setChannel(channel.value));
+
+        const statusEl = document.createElement('span');
+        statusEl.className = 'fb-selectable';
+        statusEl.setAttribute('aria-live', 'polite');
+        statusEl.style.fontSize = '11px';
+        statusEl.style.minWidth = '5rem';
+
+        root.appendChild(btn);
+        root.appendChild(device);
+        root.appendChild(channel);
+        root.appendChild(statusEl);
+        slot.appendChild(root);
+
+        _vizMicUi = {
+            root, btn, device, channel, statusEl,
+            lastStatus: '',
+            devicesKey: '',
+            unsubscribe: _lkMic.subscribe(() => _vizRefreshMicUi()),
+        };
+        // Device labels only appear once permission is granted; re-list on
+        // hot-plug. One page-lifetime listener, guarded against re-execution.
+        const md = (typeof navigator !== 'undefined') ? navigator.mediaDevices : null;
+        if (md && typeof md.addEventListener === 'function' && !window.__feedBackLyricsKaraokeDeviceWatch) {
+            window.__feedBackLyricsKaraokeDeviceWatch = true;
+            md.addEventListener('devicechange', () => _vizPopulateDevices());
+        }
+        _vizPopulateDevices();
+    }
+
+    function _vizPopulateDevices() {
+        if (!_vizMicUi) return;
+        const ui = _vizMicUi;
+        _lkMic.listDevices().then((devices) => {
+            if (_vizMicUi !== ui) return;
+            const saved = _lkMic.getState().deviceId;
+            const key = saved + '|' + devices.map((d) => d.deviceId + ':' + d.label).join('|');
+            if (key === ui.devicesKey) return;
+            ui.devicesKey = key;
+            while (ui.device.firstChild) ui.device.removeChild(ui.device.firstChild);
+            const def = document.createElement('option');
+            def.value = '';
+            def.textContent = 'Default mic';
+            ui.device.appendChild(def);
+            devices.forEach((d) => {
+                const opt = document.createElement('option');
+                opt.value = d.deviceId;
+                opt.textContent = d.label;
+                ui.device.appendChild(opt);
+            });
+            ui.device.value = saved;
+            if (ui.device.value !== saved) ui.device.value = '';
+        });
+    }
+
+    function _vizSetMicStatus(text) {
+        if (!_vizMicUi || text === _vizMicUi.lastStatus) return;
+        _vizMicUi.lastStatus = text;
+        _vizMicUi.statusEl.textContent = text;
+    }
+
+    /** Per-frame from the owning panel's draw — a text diff, so the DOM is
+     *  written only when the readout actually changes. */
+    function _vizUpdateMicStatus(scorer) {
+        if (!_vizMicUi) return;
+        const snap = _lkMic.getState();
+        if (snap.state !== 'listening') return;
+        const last = scorer.lastSample();
+        const fresh = !!last && (_wallNow() - last.wallAt) <= _LK_SAMPLE_FRESH_MS;
+        const st = scorer.stats();
+        const note = fresh ? midiToName(last.midi) : '—';
+        const acc = st.accuracy === null ? '' : ' · ' + Math.round(st.accuracy * 100) + '%';
+        const streak = st.streak > 1 ? ' · ×' + st.streak : '';
+        _vizSetMicStatus(note + acc + streak);
+    }
+
+    function _vizRefreshMicUi() {
+        let wanted = false;
+        for (const inst of _vizInstances) {
+            if (inst.getSetting('micFeedback') !== false) { wanted = true; break; }
+        }
+        if (!wanted || typeof document === 'undefined') { _vizRemoveMicUi(); return; }
+        if (!_vizMicUi || !_vizMicUi.root.isConnected) {
+            _vizRemoveMicUi();
+            const slot = _vizMicSlot();
+            if (!slot || typeof document.createElement !== 'function') return;
+            _vizBuildMicUi(slot);
+            if (!_vizMicUi) return;
+        }
+        const ui = _vizMicUi;
+        const snap = _lkMic.getState();
+        const ours = _vizMicOwnerInstance() !== null;
+        const busy = !ours && snap.ownerId !== null
+            && (snap.state === 'requesting' || snap.state === 'listening' || snap.state === 'suspended');
+        const target = _vizMicTarget();
+        ui.channel.value = snap.channel;
+        ui.btn.setAttribute('aria-pressed', ours && snap.state !== 'error' ? 'true' : 'false');
+        if (busy) {
+            ui.btn.disabled = true;
+            ui.btn.className = BTN_CLASS_DISABLED;
+            ui.btn.title = 'The microphone is in use elsewhere';
+            _vizSetMicStatus('');
+        } else if (ours && snap.state === 'requesting') {
+            ui.btn.disabled = true;
+            ui.btn.className = BTN_CLASS_DISABLED;
+            ui.btn.title = 'Requesting microphone…';
+            _vizSetMicStatus('…');
+        } else if (ours && (snap.state === 'listening' || snap.state === 'suspended')) {
+            ui.btn.disabled = false;
+            ui.btn.className = BTN_CLASS_ACTIVE;
+            ui.btn.title = 'Stop microphone feedback';
+            if (snap.state === 'suspended') _vizSetMicStatus('paused');
+            _vizPopulateDevices();
+        } else if (snap.state === 'error' && snap.error) {
+            ui.btn.disabled = !target;
+            ui.btn.className = BTN_CLASS_PROMPT;
+            ui.btn.title = 'Microphone error: ' + snap.error + ' (click to retry)';
+            _vizSetMicStatus(snap.error);
+        } else {
+            ui.btn.disabled = !target;
+            ui.btn.className = target ? BTN_CLASS_PROMPT : BTN_CLASS_DISABLED;
+            ui.btn.title = target
+                ? 'Sing along: start microphone pitch feedback (asks for permission)'
+                : 'This part has no pitch to sing against';
+            _vizSetMicStatus('');
+        }
+        ui.btn.setAttribute('aria-label', ui.btn.title);
+    }
+
+    /** The 🎤 click: stop if a panel holds the mic, otherwise start it for
+     *  the first panel that can score. Exported for tests. */
+    function _vizOnMicClick() {
+        const owner = _vizMicOwnerInstance();
+        if (owner) {
+            owner.releaseMic();
+            _vizRefreshMicUi();
+            return Promise.resolve(false);
+        }
+        const target = _vizMicTarget();
+        if (!target) return Promise.resolve(false);
+        return target.requestMic();
+    }
 
     // Set when a provider instance turned the legacy overlay off, so the
     // last instance to be destroyed can hand playback back rather than
@@ -1958,6 +2793,10 @@
         } else {
             teardownOverlay();
         }
+        // Belt and braces: whatever state the overlay's toggle is in, its
+        // microphone session ends here — the shared controller would refuse
+        // a provider start while the overlay still held it.
+        if (_lkMic.release(_lkOverlayOwner)) resetUserResults();
         _vizSuppressNoteDetect();
     }
 
@@ -2199,10 +3038,9 @@
     // `{t, d, w, midi}` route shape, while this consumes the canonical
     // `/playback` `{start, duration, text, midi}` tokens (#13), and the
     // scoring-dependent layers it interleaves (accuracy tint on the sung
-    // portion, the sung-pitch trace, the top stats band) are deliberately
-    // NOT ported here — they belong with the microphone consolidation in
-    // #11. The band they occupy is still reserved so #11 drops in without
-    // re-tuning the stage.
+    // portion, the sung-pitch trace, the top stats band) arrived with the
+    // microphone consolidation in #11 and draw only while this panel is
+    // scoring (`view.score`), in the band #15 reserved for them.
 
     // Violet note ramp — the lit-slab look. Deliberately outside the
     // red/amber/green accuracy family and the cool duet-guide hues.
@@ -2210,6 +3048,13 @@
     const STAGE_NOTE_MID = '#c084fc';
     const STAGE_NOTE_DEEP = '#7c3aed';
     const STAGE_NOTE_LOW = '#5b21b6';
+    // Accuracy family (#11) — Karaoke Highway's COL_GREEN/AMBER/RED.
+    const STAGE_ACC_GREEN = '#34d399';
+    const STAGE_ACC_AMBER = '#e8c040';
+    const STAGE_ACC_RED = '#f87171';
+    const STAGE_STAT_TEXT = '#f4f4ff';
+    const STAGE_STAT_LABEL = 'rgba(200,205,225,0.62)';
+    const STAGE_TRACE_GAP_S = 0.2;   // break the sung trace across rests
     const STAGE_WALL_TOP = '#0a0b14';
     const STAGE_WALL_BOTTOM = '#0d1120';
     const STAGE_LANE = 'rgba(255,255,255,0.05)';
@@ -2243,6 +3088,81 @@
     function _vizDiaPos(midi) {
         const r = Math.round(midi);
         return Math.floor(r / 12) * 7 + SEMI_TO_DIA[((r % 12) + 12) % 12];
+    }
+
+    /** Continuous diatonic position, for a sung pitch that sits between
+     *  semitones (the trace glides; the slabs snap). */
+    function _vizDiaPosF(midi) {
+        const lo = Math.floor(midi);
+        const lp = _vizDiaPos(lo);
+        return lp + (_vizDiaPos(lo + 1) - lp) * (midi - lo);
+    }
+
+    /** Red → amber → green by syllable accuracy (Karaoke Highway's ramp). */
+    function _vizAccuracyRgb(acc) {
+        if (acc < 0.5) {
+            const k = acc / 0.5;
+            return [248 - 16 * k, 113 + 79 * k, 113 - 49 * k];
+        }
+        const k = (acc - 0.5) / 0.5;
+        return [232 - 180 * k, 192 + 19 * k, 64 + 89 * k];
+    }
+
+    /** Score / streak / accuracy across the reserved top band. */
+    function _vizDrawStats(ctx2d, W, railW, top, bandH, u, score) {
+        const st = score.stats;
+        const live = score.live;
+        const acc = st.accuracy;
+        const accColor = acc === null ? STAGE_STAT_TEXT
+            : acc >= 0.8 ? STAGE_ACC_GREEN : acc >= 0.5 ? STAGE_ACC_AMBER : STAGE_ACC_RED;
+        const cells = [
+            { label: 'SCORE', val: String(st.score), color: STAGE_STAT_TEXT },
+            { label: 'STREAK', val: live ? String(st.streak) : 'best ' + st.bestStreak, color: STAGE_ACC_AMBER },
+            { label: 'ACCURACY', val: acc === null ? '—' : Math.round(acc * 100) + '%', color: accColor },
+        ];
+        const cellW = 70 * u;
+        const gap = 26 * u;
+        const totalW = cells.length * cellW + (cells.length - 1) * gap;
+        // Right-aligned so the duet "SING:" label on the left keeps its room.
+        let x = Math.max(railW, W - totalW - 12 * u);
+        const labelFont = Math.max(8, Math.round(9 * u)) + 'px sans-serif';
+        const valFont = 'bold ' + Math.max(12, Math.round(17 * u)) + 'px sans-serif';
+        ctx2d.textAlign = 'center';
+        for (const c of cells) {
+            const mid = x + cellW / 2;
+            ctx2d.fillStyle = STAGE_STAT_LABEL;
+            ctx2d.font = labelFont;
+            ctx2d.textBaseline = 'top';
+            ctx2d.fillText(c.label, mid, top + 3 * u);
+            ctx2d.fillStyle = c.color;
+            ctx2d.font = valFont;
+            ctx2d.textBaseline = 'bottom';
+            ctx2d.fillText(c.val, mid, top + bandH - 3 * u);
+            x += cellW + gap;
+        }
+    }
+
+    /** The sung-pitch history, left of the playhead, broken across rests. */
+    function _vizDrawTrace(ctx2d, trace, now, xFor, yForF, railW, playheadX, noteTop, noteBottom, u) {
+        const clampY = (v) => Math.max(noteTop + 3, Math.min(noteBottom - 3, v));
+        ctx2d.strokeStyle = 'rgba(240,246,255,0.95)';
+        ctx2d.lineWidth = Math.max(1.5, 3 * u);
+        ctx2d.lineJoin = 'round';
+        ctx2d.beginPath();
+        let prevT = -Infinity;
+        let drew = false;
+        for (let i = 0; i < trace.length; i++) {
+            const p = trace[i];
+            if (p.t > now) break;
+            const x = xFor(p.t);
+            if (x < railW) { prevT = -Infinity; continue; }
+            const y = clampY(yForF(p.midi));
+            if (p.t - prevT > STAGE_TRACE_GAP_S) ctx2d.moveTo(Math.min(playheadX, x), y);
+            else ctx2d.lineTo(Math.min(playheadX, x), y);
+            prevT = p.t;
+            drew = true;
+        }
+        if (drew) ctx2d.stroke();
     }
 
     // Delegates to the legacy overlay's midiToName/_LK_PITCH_NAMES — same
@@ -2583,6 +3503,8 @@
         ctx2d.fillRect(0, 0, W, seamY);
         _vizDrawSelectedVoiceLabel(ctx2d, voices, view.scoredIdx,
             railW, wallTop, topStatsH, u);
+        const score = view.score || null;
+        if (score) _vizDrawStats(ctx2d, W, railW, wallTop, topStatsH, u, score);
         ctx2d.lineWidth = 1;
         ctx2d.font = Math.max(8, Math.round(9 * u)) + 'px sans-serif';
         ctx2d.textAlign = 'left';
@@ -2662,16 +3584,32 @@
             _vizRoundRect(ctx2d, x, y, w, barH, radius);
             ctx2d.shadowBlur = 0;
 
-            // The accuracy tint over the sung portion of the slab is #11's —
-            // it needs scored results, and it draws between the slab and
-            // this gloss so the sung part reads lit rather than flat.
+            // Accuracy tint over the sung portion (left of the playhead),
+            // between the slab and the gloss so it reads lit, not flat —
+            // and opaque, so the violet can't muddy red/amber to purple.
+            if (score && (isPast || isActive)) {
+                const entry = score.resultFor(i);
+                const tintRight = Math.max(x, Math.min(x + w, playheadX));
+                if (entry && entry.samplesIn > 0 && tintRight > x) {
+                    const [cr, cg, cb] = _vizAccuracyRgb(entry.accuracy);
+                    const lift = (v) => Math.round(v + (255 - v) * 0.5);
+                    const ag = ctx2d.createLinearGradient(0, y, 0, y + barH);
+                    ag.addColorStop(0, `rgb(${lift(cr)}, ${lift(cg)}, ${lift(cb)})`);
+                    ag.addColorStop(1, `rgb(${Math.round(cr * 0.8)}, ${Math.round(cg * 0.8)}, ${Math.round(cb * 0.8)})`);
+                    ctx2d.fillStyle = ag;
+                    _vizRoundRect(ctx2d, x, y, tintRight - x, barH, radius);
+                }
+            }
 
             ctx2d.fillStyle = isActive ? 'rgba(255,255,255,0.85)' : 'rgba(235,230,255,0.30)';
             _vizRoundRect(ctx2d, x + 2 * u, y + 1.5 * u,
                 Math.max(1, w - 4 * u), 2.5 * u, 1.5 * u);
         }
 
-        // The sung-pitch history trace belongs here, under the playhead (#11).
+        if (score && score.trace.length) {
+            const yForF = (m) => noteTop + ((dHi - _vizDiaPosF(m)) / dSpan) * (usable - barH) + barH / 2;
+            _vizDrawTrace(ctx2d, score.trace, now, xFor, yForF, railW, playheadX, noteTop, noteBottom, u);
+        }
 
         ctx2d.strokeStyle = STAGE_PLAYHEAD;
         ctx2d.lineWidth = Math.max(1.5, 2 * u);
@@ -2711,11 +3649,42 @@
         let failedKey = null;
         let loadSeq = 0;           // monotonic; stale responses drop themselves
         let abortCtl = null;
-        const settings = Object.assign({}, VIZ_SETTING_DEFAULTS);
+        // Scoring keys start from the engine preferences (which carry any
+        // migrated Karaoke Highway calibration); the host's persisted
+        // per-panel values arrive through applySetting and win.
+        const settings = Object.assign({}, VIZ_SETTING_DEFAULTS, _vizEngineScoringDefaults());
+
+        // ── Microphone scoring (#11) — all panel-local ──
+        const scorer = _lkCreateVocalScorer(settings);
+        // Panel clock: splitscreen panels run their own highways, so mic
+        // frames are dated against THIS panel's last drawn time, advanced
+        // by wall time (capped: a hidden panel stops drawing, its clock
+        // freezes, and the scorer's stall gate then drops the frames).
+        // The wall anchor only moves when song time does, so a paused
+        // song reads as a frozen clock rather than jittering forward.
+        let clockT = 0;
+        let clockWallAt = 0;
+        let canvasRef = null;
+        let visibilityHandler = null;
+        const micOwner = {
+            id: 'viz-' + (++_vizOwnerSeq),
+            getClock() {
+                if (!clockWallAt) return clockT;
+                const elapsed = Math.min(0.2, Math.max(0, (_wallNow() - clockWallAt) / 1000));
+                return clockT + elapsed * getPlaybackRate();
+            },
+            onFrame(frame) { scorer.ingest(frame); },
+        };
+
+        function releaseMic() {
+            if (_lkMic.release(micOwner)) _vizRefreshMicUi();
+        }
 
         function selectVoice() {
             scoredIdx = _vizSelectedVoiceIndex(voices, settings.sungPart);
             tokens = scoredIdx >= 0 ? voices[scoredIdx].tokens : [];
+            // A different part is a different take: results never carry over.
+            scorer.setTokens(tokens);
             stageRange = voices.length > 1
                 ? _vizSharedDiatonicRange(voices)
                 : _vizDiatonicRange(tokens);
@@ -2734,6 +3703,12 @@
         }
 
         function clearData() {
+            // A song or arrangement change must never resurrect old scores,
+            // and the microphone needs a fresh explicit start per song.
+            releaseMic();
+            scorer.setTokens([]);
+            clockT = 0;
+            clockWallAt = 0;
             tokens = [];
             voices = [];
             scoredIdx = -1;
@@ -2788,6 +3763,7 @@
                 voices = _vizNormalizeVoices(res.body);
                 selectVoice();
                 loadedKey = key;
+                _vizRefreshMicUi();   // the 🎤 target may only now exist
                 _vizEmit('lyrics_karaoke:renderer-ready', {
                     filename,
                     arrangementIndex: arrIndex,
@@ -2863,6 +3839,23 @@
                     _vizClaimPlaybackOwnership();
                 }
 
+                // May be a fresh element after a context-type swap.
+                canvasRef = canvas;
+                const bus = window.feedBack;
+                if (!visibilityHandler && bus && typeof bus.on === 'function') {
+                    // Hidden panel → stop processing frames but keep the
+                    // device (suspend); shown again → resume. Filtered by
+                    // canvas so splitscreen panels don't toggle each other.
+                    visibilityHandler = (e) => {
+                        const d = e && e.detail;
+                        if (!d || d.canvas !== canvasRef || !_lkMic.isOwnedBy(micOwner)) return;
+                        if (d.visible) _lkMic.resume();
+                        else _lkMic.suspend();
+                    };
+                    bus.on('highway:visibility', visibilityHandler);
+                }
+                _vizRefreshMicUi();
+
                 if (bundle && bundle.songInfo) load(bundle.songInfo);
             },
 
@@ -2876,6 +3869,11 @@
                     load(bundle.songInfo);
                 }
                 const now = (typeof bundle.currentTime === 'number') ? bundle.currentTime : 0;
+                if (now !== clockT) {
+                    clockT = now;
+                    clockWallAt = _wallNow();
+                }
+                if (_lkMic.isOwnedBy(micOwner)) _vizUpdateMicStatus(scorer);
                 const W = ctx2d.canvas ? ctx2d.canvas.width : 0;
                 const H = ctx2d.canvas ? ctx2d.canvas.height : 0;
                 if (!W || !H) return;
@@ -2884,6 +3882,7 @@
                 // flat ribbon silently — not a user-facing mode toggle.
                 // Mirrors the reference's `this._range` check.
                 if (stageRange) {
+                    const live = _lkMic.isOwnedBy(micOwner);
                     _vizDrawStage(ctx2d, W, H, {
                         range: stageRange,
                         voices,
@@ -2892,6 +3891,14 @@
                         lines,
                         maxDuration,
                         cue,
+                        // Scoring layers only while this panel is (or was)
+                        // scoring — a panel that never sang stays clean.
+                        score: (live || scorer.hasResults()) ? {
+                            live,
+                            stats: scorer.stats(),
+                            resultFor: scorer.resultFor,
+                            trace: scorer.trace(),
+                        } : null,
                     }, now);
                     return;
                 }
@@ -2921,9 +3928,18 @@
                 initialized = false;
                 abortInflight();
                 loadSeq++;
-                resetLoadState();
+                resetLoadState();   // also releases the mic via clearData()
+                releaseMic();       // …and again, in case no data was ever loaded
+                scorer.reset();
                 ctx2d = null;
+                canvasRef = null;
+                if (visibilityHandler) {
+                    const bus = window.feedBack;
+                    if (bus && typeof bus.off === 'function') bus.off('highway:visibility', visibilityHandler);
+                    visibilityHandler = null;
+                }
                 _vizInstances.delete(this);
+                _vizRefreshMicUi();
                 // Last one out hands playback back to whoever we displaced.
                 if (wasInitialized) _vizReleasePlaybackOwnership();
             },
@@ -2934,7 +3950,22 @@
             applySetting(key, value) {
                 if (!Object.prototype.hasOwnProperty.call(VIZ_SETTING_DEFAULTS, key)) return false;
                 settings[key] = value;
-                if (key === 'sungPart' && voices.length) selectVoice();
+                if (key === 'sungPart' && voices.length) {
+                    // New part, new take: stop scoring the old one's mic too.
+                    releaseMic();
+                    selectVoice();
+                    _vizRefreshMicUi();
+                }
+                if (key === 'tolerance' || key === 'octaveIndependent' || key === 'micOffsetMs') {
+                    // Live, no reset: calibrating mid-take is the point.
+                    scorer.setSettings({ [key]: value });
+                    // Also the default for new panels and the legacy overlay.
+                    _lkUpdatePrefs({ [key]: scorer.getSettings()[key] });
+                }
+                if (key === 'micFeedback') {
+                    if (value === false) releaseMic();
+                    _vizRefreshMicUi();
+                }
                 return true;
             },
 
@@ -2943,6 +3974,27 @@
                     ? settings[key]
                     : undefined;
             },
+
+            // ── Not part of the setRenderer contract (#11) ──
+            // Read by the shared mic control and by #15's score UI.
+            getScoreStats() { return scorer.stats(); },
+            getScoreResult(i) { return scorer.resultFor(i); },
+            getSungTrace() { return scorer.trace(); },
+            /** Whether this panel can score: mic feedback on and a pitched part. */
+            canScore() {
+                if (settings.micFeedback === false || destroyed || !initialized) return false;
+                for (const tok of tokens) if (tok.midi !== null) return true;
+                return false;
+            },
+            /** Explicit-action entry point: callers wire this to a click. */
+            requestMic() {
+                if (!this.canScore()) return Promise.resolve(false);
+                const p = _lkMic.start(micOwner);
+                _vizRefreshMicUi();
+                return p.then((ok) => { _vizRefreshMicUi(); return ok; });
+            },
+            releaseMic() { releaseMic(); },
+            ownsMic() { return _lkMic.isOwnedBy(micOwner); },
         };
     }
 
@@ -3036,6 +4088,25 @@
             _vizDrawFrame,
             setKaraokeMode,
             _karaokeModeForTest: () => karaokeMode,
+            // #11 vocal pitch engine
+            yinDetect,
+            freqToMidi,
+            midiToName,
+            _lkDetectMidi,
+            _lkPitchDistance,
+            _lkPitchMatches,
+            _lkFrameMidpointTime,
+            _lkApplyMicOffset,
+            _lkNormalizeScoringSettings,
+            _lkNormalizeChannel,
+            _lkSelectChannel,
+            _lkLoadPrefs,
+            _lkCreateVocalScorer,
+            _lkCreateMicController,
+            _lkMic,
+            _lkOverlayOwner,
+            _vizOnMicClick,
+            _vizMicTarget,
         };
     }
 })();

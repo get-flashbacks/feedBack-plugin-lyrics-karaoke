@@ -59,9 +59,10 @@ Deliberately deferred so each phase stays independently reviewable:
 the scoring-backed summary card remains in **phase 2**; the key-rail tuner
 and voice-technique panels are **phase 3** (the stage
 reserves a narrow rail for them); and the accuracy tint on the sung
-portion of a slab, the sung-pitch trace, and the top stats band are
-**#11**, since they need scored results — the band's height is reserved at
-the reference's value so adding it moves no notes.
+portion of a slab, the sung-pitch trace, and the top stats band shipped
+with **#11**, since they need scored results — they draw only while a panel
+is (or was) scoring, in the band reserved at the reference's height, so
+they move no notes.
 
 Multi-voice is *rendered* here (scored voice as slabs, the rest as
 secondary flat guide bars on one shared axis). `/playback` translates
@@ -118,6 +119,12 @@ behind a capability, and it never touches the audio-input control plane (no
 could act on and we would not honour, so they belong with #11's microphone
 consolidation. The mic *ownership* handshake, being lifecycle, did land here
 — see below.
+
+**#11 added `audio-input`** (roles: `provider`; `register-source` /
+`unregister-source`), because the plugin now does honour it: while the
+microphone is listening it registers `lyrics_karaoke:mic` as an advisory
+managed input source and unregisters it on teardown. `note-detection` is
+still **not** declared — see [the engine decisions](#vocal-pitch-engine-11).
 
 ### Legacy overlay — temporary compatibility fallback
 
@@ -404,6 +411,79 @@ behavior for pitch-less songs.
   plugin-specific code — the same mechanism Karaoke Highway's `plugin.json`
   already declares.
 
+## Vocal pitch engine (#11)
+
+One engine in `screen.js`, used by both the provider and the legacy overlay —
+there is no second YIN implementation, microphone path, or scorer.
+
+- **Single microphone, exclusive owner.** `_lkCreateMicController()` is a
+  page singleton (parked on `window` so a plugin reload can't create a
+  second one). `start(owner)` refuses while a *different* owner holds it,
+  so exclusivity is structural: the overlay cannot open a stream while a
+  provider panel holds the mic, and vice versa. Operations: `start`,
+  `stop`, `release(owner)`, `suspend` / `resume` (device kept open, frame
+  pump stopped — used when a panel's canvas is hidden via
+  `highway:visibility`), `destroy`, `setDevice`, `setChannel`.
+- **Explicit action only.** `getUserMedia` is reached only from a click:
+  the provider's shared 🎤 control (v3 plugin slot, else
+  `#player-controls`) or the overlay's existing 🎤 button. Nothing starts
+  the mic on load, song change, or from a restored setting. A song or part
+  change releases it; the next song needs a new click.
+- **Privacy / teardown.** Only the detected pitch leaves the frame pump.
+  No audio is stored or transmitted. Stop, destroy, and device loss (a
+  track's `ended`) stop every `MediaStream` track, disconnect the graph,
+  close the `AudioContext`, and clear the timer. Permission and device
+  errors are surfaced once (control tooltip/readout); there is no retry
+  loop — a missing saved device falls back to the default input exactly
+  once.
+- **Timing.** Frames are dated at the capture buffer's **midpoint** on the
+  owning panel's clock (splitscreen panels run their own), converted by the
+  playback rate. The **only** other correction is the user's
+  `micOffsetMs`, applied by the scorer — it shifts scoring and the sung
+  trace, never playback. Live offset changes move the seek gate's
+  reference so calibrating mid-take doesn't wipe it.
+- **Scoring** (`_lkCreateVocalScorer()`, one per panel / overlay): a
+  syllable is judged once the scoring clock passes its end — `perfect`
+  (≥ 90% of its frames in tune), `good` (≥ 50%), else `miss`. Score and
+  streak follow Karaoke Highway's formula (hit: `100·acc·(1 + 0.1·min(30,
+  streak))`; miss: `50·acc`, streak reset). Accuracy is sample-weighted.
+  A backward jump > 0.25 s wipes the take (no resurrected scores); smaller
+  backsteps and a frozen clock are dropped; a forward jump > 1.5 s leaves
+  the skipped syllables unjudged instead of counting them as misses.
+  Lyric-only syllables are never judged.
+- **Device and channel** are properties of the one microphone, so they
+  live in the shared control rather than per-panel settings: device picker
+  (labels appear after permission; re-listed on `devicechange`) and a
+  Mix / Ch 1 / Ch 2 channel picker for interfaces presenting one stereo
+  device. Both apply without reloading — a channel change on the next
+  buffer, a device change by restarting the stream for the same owner.
+- **Settings namespace.** Engine preferences are one versioned document,
+  `lyrics_karaoke.prefs.v1` =
+  `{v, deviceId, channel, tolerance, octaveIndependent, micOffsetMs}`. The
+  three scoring keys remain per-panel viz settings (host-persisted,
+  feedBack#849); the document holds the default new panels and the overlay
+  start from, and panel changes write through to it. On first load, if the
+  document is absent, Karaoke Highway's compatible `vocals_highway.*`
+  values (tolerance, octaveIndependent, micOffsetMs, micChannel,
+  micDeviceId) are migrated; its `micOn` bit is deliberately not, since
+  the mic only starts on a click. The overlay's own
+  `lyrics_karaoke.micFeedback` on/off bit is unchanged.
+- **Decisions on the two note_detect integrations above.** (2) *Reuse
+  note_detect's detector*: not taken — its matcher is guitar-keyed and a
+  vocals mode doesn't exist; the purpose-built monophonic YIN stays. (1)
+  *Publish judgments through `setNoteStateProvider`*: deferred to #15 —
+  today the provider is the only renderer that draws vocals arrangements,
+  so there is no second renderer to light, and #15's score/trace UI is
+  where per-syllable results become visible. The scorer already exposes
+  per-syllable `quality`/`accuracy` (`getScoreResult(i)`), which is what a
+  note-state provider would return.
+- **Not in #11:** the score/streak/accuracy band, accuracy tint, sung-pitch
+  trace drawing and end-of-song summary (#15 — the renderer exposes
+  `getScoreStats()` / `getScoreResult(i)` / `getSungTrace()` for them);
+  per-panel microphone arbitration in splitscreen (#16 — until then the
+  mic scores the first live panel with mic feedback on and a pitched
+  part).
+
 ## Compatibility and migration policy
 
 - A pack prepared by the current plugin (`lyrics.json` + `vocal_pitch.json`
@@ -447,9 +527,13 @@ Dependent issues should follow the same style:
   create, destroy, song switch, failed data load, unsupported host, two
   simultaneous instances — no real FeedBack host required, mirroring how
   Karaoke Highway's own `tests/` stub FastAPI rather than spin up a server.
-- #11 (mic/scoring consolidation): pure unit tests for YIN helpers,
-  octave-free distance, tolerance boundaries, timing offsets, seek-back
-  reset — no live microphone needed.
+- #11 (mic/scoring consolidation): `tests/vocal-engine.test.js` — pure
+  unit tests for YIN helpers, octave-free distance, tolerance boundaries,
+  timing offsets, seek-back reset, scoring aggregation and prefs
+  migration, plus the mic controller against a fake media environment
+  (exclusivity, permission denial, device fallback/loss, suspend/resume,
+  live device/channel switch, full teardown) and the provider↔mic wiring.
+  No live microphone needed.
 - #16 (duet/splitscreen): two-vocal-part fixtures using `vocal_tracks`,
   independent panel selection, a shared scale, and teardown coverage.
 - Full CI/manual-matrix gate lives in #17's Definition of Done; this
