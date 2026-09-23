@@ -492,6 +492,14 @@ test('applySetting rejects keys the manifest does not declare', () => {
     assert.strictEqual(r.getSetting('unknownKey'), undefined);
 });
 
+test('leftRailMode falls back on unknown values', () => {
+    const r = window.feedBackViz_lyrics_karaoke();
+    assert.strictEqual(r.applySetting('leftRailMode', 'technique'), true);
+    assert.strictEqual(r.getSetting('leftRailMode'), 'technique');
+    assert.strictEqual(r.applySetting('leftRailMode', 'mystery'), true);
+    assert.strictEqual(r.getSetting('leftRailMode'), 'absolute');
+});
+
 // ── Rendering ───────────────────────────────────────────────────────────
 
 test('lyrics-only content still renders text with no pitch bars', () => {
@@ -1151,12 +1159,41 @@ test('the stage keeps lyrics below the horizon seam', () => {
 test('the active syllable, sung syllables and upcoming ones differ', () => {
     const canvas = makeCanvas({ width: 960, height: 480 });
     const ctx = canvas.getContext('2d');
-    // now = 1.6 → "hel" (1.0-1.5) sung, "lo" (1.5-2.0) active.
+    // now = 1.6 -> "hel" (1.0-1.5) sung, "lo" (1.5-2.0) active.
     screen._vizDrawStage(ctx, 960, 480, stageView(), 1.6);
     const byText = {};
     for (const t of ctx.texts) byText[t.t.trim()] = t.fill;
     assert.strictEqual(byText.lo, '#ffffff', 'active syllable is white');
     assert.notStrictEqual(byText.hel, byText.lo, 'sung syllable differs from active');
+});
+
+test('the absolute left rail draws a compact tuner scale', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({ leftRailMode: 'absolute' }), 1.2);
+    const railLabels = ctx.texts.filter((t) => /^[A-G]-?\d+$/.test(t.t) && t.x < 74);
+    assert.ok(railLabels.length > 0, 'absolute rail labels pitches inside the left rail');
+});
+
+test('the voice-technique left rail draws coaching state from score results', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480,
+        stageView({ leftRailMode: 'technique', score: scoreView() }), 1.2);
+    const texts = ctx.texts.map((t) => t.t);
+    for (const want of ['PITCH', 'LOCK', 'RUN', '2']) {
+        assert.ok(texts.includes(want), `missing technique rail text ${want}`);
+    }
+});
+
+test('the left rail can be turned off', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const ctx = canvas.getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({ leftRailMode: 'off' }), 1.2);
+    assert.ok(!ctx.texts.some((t) => t.t === 'PITCH' || t.t === 'LOCK'),
+        'technique rail text is absent when the rail is off');
+    assert.ok(!ctx.texts.some((t) => /^[A-G]-?\d+$/.test(t.t) && t.x < 30),
+        'absolute rail labels are absent when the rail is off');
 });
 
 test('the stage shows a countdown and bouncing ball during a silent lead-in', () => {
@@ -1643,15 +1680,35 @@ test('the stage draws the stats band, accuracy tint and sung trace while scoring
 test('a finished (not live) take shows best streak and no trace past now', () => {
     const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
     screen._vizDrawStage(ctx, 960, 480, stageView({
-        score: scoreView({ live: false, trace: [{ t: 5, midi: 60 }], stats: {
+        score: scoreView({ live: false, finished: true, trace: [{ t: 5, midi: 60 }], stats: {
             score: 0, streak: 0, bestStreak: 7, hits: 0, misses: 1, judged: 1, accuracy: null,
         } }),
     }), 1.2);
     const texts = ctx.texts.map((t) => t.t);
     assert.ok(texts.includes('best 7'));
+    assert.ok(texts.includes('SUMMARY'), 'finished takes show the end-of-song summary card');
+    assert.ok(texts.includes('-- ACC / BEST 7'), 'summary reports accuracy and best streak');
     assert.ok(texts.includes('—'), 'no accuracy yet');
     const plain = makeCanvas({ width: 960, height: 480 }).getContext('2d');
     screen._vizDrawStage(plain, 960, 480, stageView(), 1.2);
     const strokes = (c) => c.calls.filter((k) => k === 'stroke').length;
     assert.strictEqual(strokes(ctx), strokes(plain), 'future trace points are not drawn');
+});
+
+test('the summary card waits for song completion, not mic release', () => {
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({
+        score: scoreView({ live: false, finished: false }),
+    }), 1.2);
+    assert.ok(!ctx.texts.some((t) => t.t === 'SUMMARY'),
+        'mid-song mic release must not show the finished-take card');
+});
+
+test('the summary card can appear at song end while the mic is still live', () => {
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({
+        score: scoreView({ live: true, finished: true }),
+    }), 2.1);
+    assert.ok(ctx.texts.some((t) => t.t === 'SUMMARY'),
+        'natural song end should show the finished-take card');
 });

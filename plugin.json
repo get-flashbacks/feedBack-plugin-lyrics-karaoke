@@ -1,7 +1,7 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"
@@ -78,6 +78,17 @@
             { "id": "part2", "label": "Part 2" },
             { "id": "part3", "label": "Part 3" },
             { "id": "part4", "label": "Part 4" }
+          ]
+        },
+        {
+          "key": "leftRailMode",
+          "label": "Left rail",
+          "type": "select",
+          "default": "absolute",
+          "options": [
+            { "id": "absolute", "label": "Absolute tuner" },
+            { "id": "technique", "label": "Voice technique" },
+            { "id": "off", "label": "Off" }
           ]
         }
       ]
