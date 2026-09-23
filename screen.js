@@ -2358,6 +2358,21 @@
         });
     }
 
+    function _vizLyricFillStyle(primary, tok, now) {
+        if (!primary) return STAGE_LYRIC_SECONDARY;
+        if (tok.start + (tok.duration || 0) <= now) return BAR_COLOR_FILL;
+        if (tok.start <= now) return '#ffffff';
+        return TEXT_COLOR_PAST;
+    }
+
+    function _vizTrackLyricPosition(state, primary, tok, now, center) {
+        if (!primary || !tok) return;
+        if (tok.start <= now) state.lastX = center;
+        if (tok.start <= now && now < tok.start + (tok.duration || 0)) {
+            state.activeX = center;
+        }
+    }
+
     /** One centred lyric line, per-syllable coloured against `now`:
      *  sung = gold, active = white, upcoming = dim. Shrinks to fit rather
      *  than overflowing the stage. */
@@ -2385,32 +2400,19 @@
         ctx2d.textBaseline = 'middle';
         const x0 = areaX + (areaW - total) / 2;
         let x = x0;
-        let activeX = null;
-        let lastX = null;
+        const position = { activeX: null, lastX: null };
         for (let p = 0; p < line.parts.length; p++) {
             const part = line.parts[p];
             const tok = tokens[part.idx];
             const text = piece(part, p);
-            if (!primary) {
-                ctx2d.fillStyle = STAGE_LYRIC_SECONDARY;
-            } else if (tok.start + (tok.duration || 0) <= now) {
-                ctx2d.fillStyle = BAR_COLOR_FILL;      // sung
-            } else if (tok.start <= now) {
-                ctx2d.fillStyle = '#ffffff';           // active syllable
-            } else {
-                ctx2d.fillStyle = TEXT_COLOR_PAST;     // upcoming
-            }
+            ctx2d.fillStyle = _vizLyricFillStyle(primary, tok, now);
             ctx2d.fillText(text, x, y);
             const w = ctx2d.measureText(text).width;
-            if (primary && tok) {
-                const center = x + w / 2;
-                if (tok.start <= now) lastX = center;
-                if (tok.start <= now && now < tok.start + (tok.duration || 0)) activeX = center;
-            }
+            _vizTrackLyricPosition(position, primary, tok, now, x + w / 2);
             x += w;
         }
-        if (activeX === null && lastX !== null) activeX = lastX;
-        return { x0, x1: x, activeX };
+        if (position.activeX === null) position.activeX = position.lastX;
+        return { x0, x1: x, activeX: position.activeX };
     }
 
     /** Median syllable spacing folded into a beat-like range. The playback
@@ -2513,6 +2515,17 @@
             fontPx, cy, railW, u, cue);
     }
 
+    function _vizDrawSelectedVoiceLabel(ctx2d, voices, scoredIdx, railW, wallTop, topStatsH, u) {
+        if (voices.length <= 1 || !voices[scoredIdx]) return;
+        const selected = voices[scoredIdx];
+        ctx2d.fillStyle = 'rgba(216,180,254,0.9)';
+        ctx2d.font = 'bold ' + Math.max(9, Math.round(11 * u)) + 'px sans-serif';
+        ctx2d.textAlign = 'left';
+        ctx2d.textBaseline = 'middle';
+        ctx2d.fillText('SING: ' + String(selected.name || selected.id).toUpperCase(),
+            railW + 8 * u, wallTop + topStatsH / 2);
+    }
+
     /** The perspective stage: note wall, diatonic lanes, horizon seam,
      *  duet guide bars, violet note slabs, playhead, lyric band.
      *
@@ -2566,15 +2579,8 @@
         wg.addColorStop(1, STAGE_WALL_BOTTOM);
         ctx2d.fillStyle = wg;
         ctx2d.fillRect(0, 0, W, seamY);
-        if (voices.length > 1 && voices[view.scoredIdx]) {
-            const selected = voices[view.scoredIdx];
-            ctx2d.fillStyle = 'rgba(216,180,254,0.9)';
-            ctx2d.font = 'bold ' + Math.max(9, Math.round(11 * u)) + 'px sans-serif';
-            ctx2d.textAlign = 'left';
-            ctx2d.textBaseline = 'middle';
-            ctx2d.fillText('SING: ' + String(selected.name || selected.id).toUpperCase(),
-                railW + 8 * u, wallTop + topStatsH / 2);
-        }
+        _vizDrawSelectedVoiceLabel(ctx2d, voices, view.scoredIdx,
+            railW, wallTop, topStatsH, u);
         ctx2d.lineWidth = 1;
         ctx2d.font = Math.max(8, Math.round(9 * u)) + 'px sans-serif';
         ctx2d.textAlign = 'left';
