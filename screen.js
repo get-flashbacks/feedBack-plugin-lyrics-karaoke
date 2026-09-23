@@ -2476,6 +2476,7 @@
         octaveIndependent: false,
         micOffsetMs: 0,
         sungPart: 'primary',
+        leftRailMode: 'absolute',
     });
 
     // Live renderer instances support provider playback ownership and the
@@ -3246,6 +3247,91 @@
         if (drew) ctx2d.stroke();
     }
 
+    function _vizDrawSummaryCard(ctx2d, W, H, railW, seamY, u, score) {
+        if (!score || score.live || !score.stats || !score.stats.judged) return;
+        const st = score.stats;
+        const w = Math.min(260 * u, Math.max(170 * u, (W - railW) * 0.36));
+        const h = 92 * u;
+        const x = railW + (W - railW - w) / 2;
+        const y = Math.max(56 * u, seamY - h - 22 * u);
+        ctx2d.fillStyle = 'rgba(15,23,42,0.88)';
+        _vizRoundRect(ctx2d, x, y, w, h, Math.max(8, 10 * u));
+        ctx2d.textAlign = 'center';
+        ctx2d.textBaseline = 'middle';
+        ctx2d.font = 'bold ' + Math.max(9, Math.round(11 * u)) + 'px sans-serif';
+        ctx2d.fillStyle = STAGE_STAT_LABEL;
+        ctx2d.fillText('SUMMARY', x + w / 2, y + 16 * u);
+        ctx2d.font = 'bold ' + Math.max(18, Math.round(26 * u)) + 'px sans-serif';
+        ctx2d.fillStyle = STAGE_STAT_TEXT;
+        ctx2d.fillText(String(st.score), x + w / 2, y + 44 * u);
+        ctx2d.font = 'bold ' + Math.max(8, Math.round(10 * u)) + 'px sans-serif';
+        const acc = st.accuracy === null ? '--' : Math.round(st.accuracy * 100) + '%';
+        ctx2d.fillStyle = st.accuracy !== null && st.accuracy >= 0.8 ? STAGE_ACC_GREEN
+            : st.accuracy !== null && st.accuracy >= 0.5 ? STAGE_ACC_AMBER : STAGE_ACC_RED;
+        ctx2d.fillText(acc + ' ACC / BEST ' + st.bestStreak, x + w / 2, y + 70 * u);
+    }
+
+    function _vizDrawAbsoluteRail(ctx2d, railW, noteTop, noteBottom, yFor, range, barH, u, score) {
+        const pad = Math.max(3, 4 * u);
+        const x = pad;
+        const w = Math.max(16 * u, railW - pad * 2);
+        ctx2d.fillStyle = 'rgba(15,23,42,0.74)';
+        _vizRoundRect(ctx2d, x, noteTop, w, noteBottom - noteTop, Math.max(5, 7 * u));
+        ctx2d.textAlign = 'center';
+        ctx2d.textBaseline = 'middle';
+        ctx2d.font = 'bold ' + Math.max(8, Math.round(9 * u)) + 'px sans-serif';
+        for (let m = range.midiLo; m <= range.midiHi; m++) {
+            const natural = _vizIsNatural(m);
+            const y = yFor(m) + barH / 2;
+            ctx2d.strokeStyle = natural ? 'rgba(226,232,240,0.25)' : 'rgba(148,163,184,0.14)';
+            ctx2d.beginPath();
+            ctx2d.moveTo(x + (natural ? 2 : w * 0.36), y);
+            ctx2d.lineTo(x + w - 2, y);
+            ctx2d.stroke();
+            if (natural) {
+                ctx2d.fillStyle = 'rgba(226,232,240,0.78)';
+                ctx2d.fillText(_vizMidiToName(m), x + w / 2, y);
+            }
+        }
+        const trace = score && Array.isArray(score.trace) ? score.trace : [];
+        if (trace.length) {
+            const p = trace[trace.length - 1];
+            const y = yFor(p.midi) + barH / 2;
+            ctx2d.fillStyle = '#f8fafc';
+            ctx2d.beginPath();
+            ctx2d.arc(x + w / 2, Math.max(noteTop + 4, Math.min(noteBottom - 4, y)), Math.max(3, 4 * u), 0, Math.PI * 2);
+            ctx2d.fill();
+        }
+    }
+
+    function _vizDrawTechniqueRail(ctx2d, railW, noteTop, topStatsH, u, score) {
+        const st = score && score.stats ? score.stats : null;
+        const accuracy = st && st.accuracy !== null ? st.accuracy : 0;
+        const streak = st ? st.streak : 0;
+        const x = Math.max(3, 4 * u);
+        const w = Math.max(18 * u, railW - x * 2);
+        const h = Math.max(72 * u, topStatsH * 2.2);
+        const y = noteTop + 8 * u;
+        ctx2d.fillStyle = 'rgba(15,23,42,0.78)';
+        _vizRoundRect(ctx2d, x, y, w, h, Math.max(5, 7 * u));
+        ctx2d.textAlign = 'center';
+        ctx2d.textBaseline = 'middle';
+        ctx2d.font = 'bold ' + Math.max(7, Math.round(8 * u)) + 'px sans-serif';
+        const labelX = x + w / 2;
+        const cells = [
+            ['PITCH', accuracy >= 0.8 ? 'LOCK' : accuracy >= 0.5 ? 'HOLD' : 'FIND',
+                accuracy >= 0.8 ? STAGE_ACC_GREEN : accuracy >= 0.5 ? STAGE_ACC_AMBER : STAGE_ACC_RED],
+            ['RUN', streak ? String(streak) : '-', STAGE_STAT_TEXT],
+        ];
+        for (let i = 0; i < cells.length; i++) {
+            const cy = y + (i + 0.5) * h / cells.length;
+            ctx2d.fillStyle = STAGE_STAT_LABEL;
+            ctx2d.fillText(cells[i][0], labelX, cy - 8 * u);
+            ctx2d.fillStyle = cells[i][2];
+            ctx2d.fillText(cells[i][1], labelX, cy + 7 * u);
+        }
+    }
+
     // Delegates to the legacy overlay's midiToName/_LK_PITCH_NAMES — same
     // round -> pitch-class -> octave math, one pitch-name table to keep in
     // sync rather than two.
@@ -3550,9 +3636,8 @@
         // reference's height so adding it later doesn't move the notes.
         const topStatsH = 42 * u;
         const seamY = Math.round(H * STAGE_SEAM_FRAC);
-        // Narrow rail: the key-rail gauge and voice-technique panel that
-        // widen this are #15 phase 3.
-        const railW = Math.round(10 * u);
+        const railMode = view.leftRailMode || 'absolute';
+        const railW = railMode === 'off' ? Math.round(10 * u) : Math.round(74 * u);
         const noteTop = wallTop + topStatsH;
         const noteBottom = seamY;
 
@@ -3598,8 +3683,15 @@
             ctx2d.moveTo(railW, y);
             ctx2d.lineTo(W, y);
             ctx2d.stroke();
-            ctx2d.fillStyle = STAGE_LANE_LABEL;
-            ctx2d.fillText(_vizMidiToName(m), railW + 5 * u, y);
+            if (railMode !== 'off') {
+                ctx2d.fillStyle = STAGE_LANE_LABEL;
+                ctx2d.fillText(_vizMidiToName(m), railW + 5 * u, y);
+            }
+        }
+        if (railMode === 'absolute') {
+            _vizDrawAbsoluteRail(ctx2d, railW, noteTop, noteBottom, yFor, range, barH, u, score);
+        } else if (railMode === 'technique') {
+            _vizDrawTechniqueRail(ctx2d, railW, noteTop, topStatsH, u, score);
         }
 
         _vizDrawSeam(ctx2d, W, seamY, u);
@@ -3700,6 +3792,7 @@
         ctx2d.stroke();
 
         _vizDrawLyricBand(ctx2d, tokens, view.lines, now, railW, W, H, seamY, u, view.cue);
+        if (score) _vizDrawSummaryCard(ctx2d, W, H, railW, seamY, u, score);
 
         ctx2d.restore();
     }
@@ -3978,6 +4071,7 @@
                         lines,
                         maxDuration,
                         cue,
+                        leftRailMode: settings.leftRailMode,
                         // Scoring layers only while this panel is (or was)
                         // scoring — a panel that never sang stays clean.
                         score: (live || scorer.hasResults()) ? {
@@ -4052,6 +4146,11 @@
                 if (key === 'micFeedback') {
                     if (value === false) releaseMic();
                     _vizRefreshMicUi();
+                }
+                if (key === 'leftRailMode') {
+                    if (value !== 'absolute' && value !== 'technique' && value !== 'off') {
+                        settings[key] = VIZ_SETTING_DEFAULTS.leftRailMode;
+                    }
                 }
                 return true;
             },
@@ -4171,6 +4270,9 @@
             _vizActiveLyricLineIndex,
             _vizComputeCueBeat,
             _vizDrawStage,
+            _vizDrawSummaryCard,
+            _vizDrawAbsoluteRail,
+            _vizDrawTechniqueRail,
             stripSyllableMarker,
             _vizPitchRange,
             _vizMaxDuration,

@@ -55,14 +55,13 @@ syllable cue and a numeric get-ready countdown during silent lead-ins. Its
 beat estimate and smoothed horizontal position are renderer-instance state,
 reset on song changes, so splitscreen panels cannot move one another's cue.
 
-Deliberately deferred so each phase stays independently reviewable:
-the scoring-backed summary card remains in **phase 2**; the key-rail tuner
-and voice-technique panels are **phase 3** (the stage
-reserves a narrow rail for them); and the accuracy tint on the sung
-portion of a slab, the sung-pitch trace, and the top stats band shipped
-with **#11**, since they need scored results — they draw only while a panel
-is (or was) scoring, in the band reserved at the reference's height, so
-they move no notes.
+**#15 final renderer polish (shipped):** the stage now includes selectable
+left-rail modes from the host settings popover: **Absolute tuner** (compact
+pitch scale plus the latest sung-pitch cursor), **Voice technique** (pitch
+lock/hold/find and current run guidance from the scoring state), and **Off**
+for dense/small panels. Finished scored takes draw an in-stage summary card
+with score, accuracy, and best streak, while live takes continue to use the
+top stats band, accuracy tint, and sung-pitch trace.
 
 Multi-voice is *rendered* here (scored voice as slabs, the rest as
 secondary flat guide bars on one shared axis). `/playback` translates
@@ -488,24 +487,39 @@ there is no second YIN implementation, microphone path, or scorer.
 
 ## Compatibility and migration policy
 
-- A pack prepared by the current plugin (`lyrics.json` + `vocal_pitch.json`
-  referenced from the manifest) plays back through the new provider with
-  **no regeneration** — `/playback` already reads those exact keys.
-- A duet may retain those singular keys as legacy aliases. When either alias
-  differs from the primary `vocal_tracks` entry, `/playback` keeps serving the
-  canonical multi-voice payload but logs a route-time warning so authors can
-  fix the pack before legacy and duet-aware readers show different leads.
-- The preparation screen's generate/re-extract/clear/export routes are
-  untouched by this integration.
-- **Rollback:** disabling the provider's visualization capability (or
-  running on a host below the minimum version) restores the legacy overlay
-  automatically — no data migration to reverse, since the provider never
-  writes anything the overlay doesn't already understand.
-- Old hosts (pre-`0.3.0-alpha.1`) get the overlay; there is no crash or
-  blank screen, since the manifest's `type: "visualization"` /
-  `capabilities` fields are additive and ignored by hosts that predate
-  them (same rule as every other optional manifest field per
-  `feedBack/CLAUDE.md`).
+### Upgrade notes for users
+
+- Keep using the same plugin id, **`lyrics_karaoke`**. There is no rename to
+  `vocals_highway`, no second plugin to install, and no generated song data
+  rewrite.
+- Existing packs prepared by Lyrics Karaoke 1.4.6 and later continue to open
+  without regeneration when they contain the same `lyrics.json` and optional
+  `vocal_pitch.json` files the plugin has always written.
+- The preparation screen remains the owner of generate, re-extract, clear,
+  save, and export workflows. The visualization provider only reads the
+  already-prepared `/playback` payload during playback.
+- Microphone preferences migrate once into `lyrics_karaoke.prefs.v1` when
+  compatible Karaoke Highway keys exist. The old `micOn` intent is ignored
+  deliberately: microphone capture still requires an explicit click.
+- The old `lyrics_karaoke.micFeedback` toggle remains honored for the legacy
+  overlay, and provider scoring settings write compatible defaults back to
+  the same preferences document for new panels.
+
+### Fallback and rollback
+
+- Hosts older than `0.3.0-alpha.1` ignore the visualization provider fields
+  and continue to use the legacy overlay path.
+- On supported hosts, disabling the visualization provider or choosing a
+  non-vocals renderer restores the legacy overlay behavior. The provider
+  does not write chart data, so rollback does not require deleting or
+  regenerating song files.
+- The provider and overlay never render/scoring controls simultaneously: a
+  live provider instance claims playback ownership, suppresses the overlay
+  and note_detect, and releases ownership on teardown.
+- Duet packs may keep singular `lyrics` / `vocal_pitch` aliases pointing at
+  the primary voice for older readers. If an alias drifts away from the
+  primary `vocal_tracks[]` entry, `/playback` warns at route time so authors
+  can fix the pack before legacy and duet-aware readers disagree.
 
 ## Provenance and licensing
 
