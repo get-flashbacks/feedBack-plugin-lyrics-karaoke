@@ -1,7 +1,7 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.7.4",
+  "version": "1.8.0",
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"
@@ -67,6 +67,18 @@
           "min": -1000,
           "max": 1000,
           "step": 5
+        },
+        {
+          "key": "sungPart",
+          "label": "Sung part",
+          "type": "select",
+          "default": "primary",
+          "options": [
+            { "id": "primary", "label": "Primary" },
+            { "id": "part2", "label": "Part 2" },
+            { "id": "part3", "label": "Part 3" },
+            { "id": "part4", "label": "Part 4" }
+          ]
         }
       ]
     }

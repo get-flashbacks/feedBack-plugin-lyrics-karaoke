@@ -184,6 +184,87 @@ def test_build_playback_payload_empty_voices_when_no_lyrics(tmp_path):
     assert payload["voices"] == []
 
 
+def test_build_playback_payload_reads_duet_vocal_tracks(tmp_path):
+    (tmp_path / "lead_lyrics.json").write_text(json.dumps([
+        {"t": 1.0, "d": 0.5, "w": "lead"},
+    ]), encoding="utf-8")
+    (tmp_path / "lead_pitch.json").write_text(json.dumps({
+        "version": 1, "notes": [{"t": 1.0, "d": 0.5, "midi": 60}],
+    }), encoding="utf-8")
+    (tmp_path / "harmony_lyrics.json").write_text(json.dumps([
+        {"t": 1.0, "d": 0.5, "w": "harm"},
+    ]), encoding="utf-8")
+    (tmp_path / "harmony_pitch.json").write_text(json.dumps({
+        "version": 1, "notes": [{"t": 1.0, "d": 0.5, "midi": 67}],
+    }), encoding="utf-8")
+    manifest = {
+        # Back-compat aliases remain valid for older readers but must not be
+        # duplicated into the canonical multi-voice response.
+        "lyrics": "lead_lyrics.json",
+        "vocal_pitch": "lead_pitch.json",
+        "vocal_tracks": [
+            {"id": "lead", "name": "Lead", "primary": True,
+             "lyrics": "lead_lyrics.json", "vocal_pitch": "lead_pitch.json"},
+            {"id": "harmony", "name": "Harmony",
+             "lyrics": "harmony_lyrics.json", "vocal_pitch": "harmony_pitch.json"},
+        ],
+    }
+
+    payload = routes._build_playback_payload("duet.feedpak", tmp_path, manifest)
+
+    assert [v["id"] for v in payload["voices"]] == ["lead", "harmony"]
+    assert [v["primary"] for v in payload["voices"]] == [True, False]
+    assert payload["voices"][0]["tokens"][0]["midi"] == 60
+    assert payload["voices"][1]["tokens"][0]["midi"] == 67
+
+
+def test_duet_first_usable_voice_becomes_primary_and_extra_flags_are_cleared(tmp_path):
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.json").write_text(json.dumps([
+            {"t": 0.0, "d": 1.0, "w": name},
+        ]), encoding="utf-8")
+    manifest = {"vocal_tracks": [
+        {"id": "a", "primary": True, "lyrics": "a.json"},
+        {"id": "b", "primary": True, "lyrics": "b.json"},
+    ]}
+
+    voices = routes._canonical_voices(tmp_path, manifest)
+
+    assert [v["primary"] for v in voices] == [True, False]
+
+
+def test_duet_rejects_duplicate_voice_ids(tmp_path):
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.json").write_text(json.dumps([
+            {"t": 0.0, "d": 1.0, "w": name},
+        ]), encoding="utf-8")
+    manifest = {"vocal_tracks": [
+        {"id": "same", "lyrics": "a.json"},
+        {"id": "same", "lyrics": "b.json"},
+    ]}
+
+    with pytest.raises(routes.PlaybackPayloadError) as exc_info:
+        routes._canonical_voices(tmp_path, manifest)
+    assert exc_info.value.status == 422
+    assert "Duplicate vocal track id" in exc_info.value.message
+
+
+def test_empty_vocal_tracks_fall_back_to_singular_aliases(tmp_path):
+    (tmp_path / "lyrics.json").write_text(json.dumps([
+        {"t": 0.0, "d": 1.0, "w": "solo"},
+    ]), encoding="utf-8")
+    manifest = {
+        "lyrics": "lyrics.json",
+        "vocal_tracks": [{"id": "empty", "lyrics": "missing.json"}],
+    }
+
+    voices = routes._canonical_voices(tmp_path, manifest)
+
+    assert len(voices) == 1
+    assert voices[0]["id"] == "primary"
+    assert voices[0]["tokens"][0]["text"] == "solo"
+
+
 def test_build_playback_payload_is_deterministic(tmp_path):
     (tmp_path / "lyrics.json").write_text(json.dumps([
         {"t": 2.0, "d": 0.5, "w": "b"},
