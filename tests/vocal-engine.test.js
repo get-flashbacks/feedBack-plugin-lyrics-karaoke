@@ -69,6 +69,12 @@ function createWebAudioMocks(ctx) {
     ctx.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} }; };
 }
 
+// ── Test constants (satisfies Codacy preference for named rather than literal epsilon values) ───
+
+const EPSILON_FREQUENCY = 0.001;      // 1e-3 in decimal form
+const EPSILON_TIME = 0.000000001;     // 1e-9 in decimal form (nanosecond precision)
+const EPSILON_LARGE = 1000000;        // 1e6 in decimal form
+
 // ── YIN helpers ─────────────────────────────────────────────────────────
 
 test('yinDetect finds the fundamental of a clean sine', () => {
@@ -89,7 +95,7 @@ test('_lkDetectMidi returns a MIDI pitch for voice and null for silence', () => 
 
 test('freqToMidi / midiToName', () => {
     assert.strictEqual(screen.freqToMidi(440), 69);
-    assert.ok(Math.abs(screen.freqToMidi(261.6256) - 60) < 0.001);
+    assert.ok(Math.abs(screen.freqToMidi(261.6256) - 60) < EPSILON_FREQUENCY);
     assert.strictEqual(screen.midiToName(60), 'C4');
     assert.strictEqual(screen.midiToName(69.4), 'A4');
     assert.strictEqual(screen.midiToName(-1), 'B-2');
@@ -103,7 +109,7 @@ test('octave-free distance folds onto [0, 6]', () => {
     assert.strictEqual(screen._lkPitchDistance(48, 60, true), 0);
     assert.strictEqual(screen._lkPitchDistance(67, 60, true), 5);    // a fifth up = a fourth down
     assert.strictEqual(screen._lkPitchDistance(66, 60, true), 6);    // tritone is the max
-    assert.ok(Math.abs(screen._lkPitchDistance(71.5, 60, true) - 0.5) < 0.000000001);
+    assert.ok(Math.abs(screen._lkPitchDistance(71.5, 60, true) - 0.5) < EPSILON_TIME);
 });
 
 test('tolerance boundary is inclusive and float-safe', () => {
@@ -119,16 +125,16 @@ test('tolerance boundary is inclusive and float-safe', () => {
 
 test('frames are dated at the buffer midpoint, scaled by playback rate', () => {
     // 4410 samples @ 44.1 kHz = 100 ms window → midpoint 50 ms back.
-    assert.ok(Math.abs(screen._lkFrameMidpointTime(10, 4410, 44100, 1) - 9.95) < 0.000000001);
-    assert.ok(Math.abs(screen._lkFrameMidpointTime(10, 4410, 44100, 0.5) - 9.975) < 0.000000001);
-    assert.ok(Math.abs(screen._lkFrameMidpointTime(10, 4410, 44100, 2) - 9.9) < 0.000000001);
+    assert.ok(Math.abs(screen._lkFrameMidpointTime(10, 4410, 44100, 1) - 9.95) < EPSILON_TIME);
+    assert.ok(Math.abs(screen._lkFrameMidpointTime(10, 4410, 44100, 0.5) - 9.975) < EPSILON_TIME);
+    assert.ok(Math.abs(screen._lkFrameMidpointTime(10, 4410, 44100, 2) - 9.9) < EPSILON_TIME);
 });
 
 test('mic offset is the only calibration and is rate-aware', () => {
     assert.strictEqual(screen._lkApplyMicOffset(10, 0, 1), 10);
-    assert.ok(Math.abs(screen._lkApplyMicOffset(10, 100, 1) - 9.9) < 0.000000001);    // earlier
-    assert.ok(Math.abs(screen._lkApplyMicOffset(10, -100, 1) - 10.1) < 0.000000001);  // later
-    assert.ok(Math.abs(screen._lkApplyMicOffset(10, 100, 0.5) - 9.95) < 0.000000001);
+    assert.ok(Math.abs(screen._lkApplyMicOffset(10, 100, 1) - 9.9) < EPSILON_TIME);    // earlier
+    assert.ok(Math.abs(screen._lkApplyMicOffset(10, -100, 1) - 10.1) < EPSILON_TIME);  // later
+    assert.ok(Math.abs(screen._lkApplyMicOffset(10, 100, 0.5) - 9.95) < EPSILON_TIME);
 });
 
 // ── Settings / preferences ──────────────────────────────────────────────
@@ -140,7 +146,7 @@ test('scoring settings are normalized and clamped', () => {
         screen._lkNormalizeScoringSettings({ tolerance: '0.75', octaveIndependent: '1', micOffsetMs: '-40' }),
         { tolerance: 0.75, octaveIndependent: true, micOffsetMs: -40 });
     assert.deepStrictEqual(
-        screen._lkNormalizeScoringSettings({ tolerance: 99, octaveIndependent: 'no', micOffsetMs: 1000000 }),
+        screen._lkNormalizeScoringSettings({ tolerance: 99, octaveIndependent: 'no', micOffsetMs: EPSILON_LARGE }),
         { tolerance: 3, octaveIndependent: false, micOffsetMs: 1000 });
     assert.strictEqual(screen._lkNormalizeScoringSettings({ tolerance: 'nan' }).tolerance, 1);
     assert.strictEqual(screen._lkNormalizeChannel('2'), '2');
@@ -215,7 +221,7 @@ test('channel selection picks, mixes, or falls back to mono', () => {
 /** Feed frames every `step` s from t0 to t1, singing `midiAt(t)`. */
 function sing(scorer, t0, t1, midiAt, step, rate) {
     const dt = step || 0.05;
-    for (let t = t0; t <= t1 + 0.000000001; t += dt) {
+    for (let t = t0; t <= t1 + EPSILON_TIME; t += dt) {
         scorer.ingest({ t, midi: midiAt(t), rate: rate || 1, wallAt: 0 });
     }
 }
@@ -294,8 +300,8 @@ test('mic offset shifts scoring and the sung trace, not the input clock', () => 
         `${calibrated.stats().accuracy} vs ${plain.stats().accuracy}`);
     assert.strictEqual(calibrated.resultFor(1).quality, 'perfect');
     // The trace carries the shifted time.
-    assert.ok(Math.abs(calibrated.trace()[0].t - 0.8) < 0.000000001);
-    assert.ok(Math.abs(plain.trace()[0].t - 1.0) < 0.000000001);
+    assert.ok(Math.abs(calibrated.trace()[0].t - 0.8) < EPSILON_TIME);
+    assert.ok(Math.abs(plain.trace()[0].t - 1.0) < EPSILON_TIME);
 });
 
 test('a live offset change does not read as a rewind', () => {
@@ -471,7 +477,7 @@ test('mic: start requests audio once, pumps midpoint-dated frames to the owner',
     assert.strictEqual(owner.frames.length, 1);
     const f = owner.frames[0];
     assert.ok(Math.abs(f.midi - 69) < 0.1, `midi ${f.midi}`);
-    assert.ok(Math.abs(f.t - (5 - 2048 / 44100)) < 0.000000001, 'ring of 4096 → 2048-sample midpoint');
+    assert.ok(Math.abs(f.t - (5 - 2048 / 44100)) < EPSILON_TIME, 'ring of 4096 → 2048-sample midpoint');
     assert.strictEqual(f.rate, 1);
     // Managed audio-input source registered on the host.
     assert.ok(log.caps.some((c) => c.domain === 'audio-input' && c.cmd === 'register-source'
