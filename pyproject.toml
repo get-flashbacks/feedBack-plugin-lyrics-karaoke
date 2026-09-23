@@ -1,0 +1,8 @@
+[tool.bandit]
+# B101 (`assert` detected) fires on every pytest-style assertion in
+# tests/ — that's the standard, correct way to assert in pytest, not a
+# security issue (asserts stripped under `python -O` matter for
+# assertions guarding runtime invariants in shipped code, not test
+# bodies that only run under pytest). Excluding the tests directory
+# avoids drowning real findings in this expected noise.
+exclude_dirs = ["tests"]

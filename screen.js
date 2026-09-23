@@ -1852,11 +1852,9 @@
     // version, and the settings namespace are fixed by
     // docs/architecture/vocals-visualization-integration.md (#10).
     //
-    // Scope note: this is the REGISTRATION + LIFECYCLE half. The ribbon
-    // drawn below is deliberately the overlay's own visual language, so a
-    // selected panel renders something correct today; porting Karaoke
-    // Highway's visual experience (Taynavv/feedback-vocals-viz) onto it is
-    // #15's job and replaces `_vizDrawFrame` wholesale.
+    // The flat ribbon remains the lyrics-only fallback. Pitched songs use
+    // the Karaoke Highway stage port below (#15), built incrementally over
+    // this registration/lifecycle foundation.
 
     const VIZ_PLUGIN_ID = 'lyrics_karaoke';
 
@@ -1872,6 +1870,7 @@
         tolerance: 1,
         octaveIndependent: false,
         micOffsetMs: 0,
+        sungPart: 'primary',
     });
 
     // Live renderer instances, for ONE purpose: deciding whether the
@@ -2001,14 +2000,10 @@
         return `${songInfo.filename}#${idx === null ? '' : idx}`;
     }
 
-/** Every voice in a `/playback` payload, normalized, dropping any that
-     *  carry no usable tokens. Multi-voice payloads are RENDERED here (the
-     *  scored voice as slabs, the rest as guide bars) — but nothing on this
-     *  path invents them: `/playback` builds `voices[]` from the singular
-     *  spec'd `lyrics`/`vocal_pitch` keys and today always returns exactly
-     *  one. Duet INGESTION stays FEP-gated (#13/#16); this deliberately
-     *  does not read `vocal_tracks` or any other non-spec content path.
-     *  Exercised by synthetic multi-voice payloads in the tests. */
+    /** Every voice in a `/playback` payload, normalized, dropping any that
+     *  carry no usable tokens. The route owns manifest compatibility and
+     *  translates the additive `vocal_tracks` extension into this canonical
+     *  shape; the renderer deliberately consumes only `voices[]`. */
     function _vizNormalizeVoices(payload) {
         const raw = (payload && Array.isArray(payload.voices)) ? payload.voices : [];
         const out = [];
@@ -2027,12 +2022,29 @@
         return out;
     }
 
-    /** Which voice this panel scores and draws as slabs. Prefers the
-     *  `primary` one; per-panel singer selection is #16. */
+    /** The `primary` voice, or the first voice if none is flagged. This is
+     *  the default a panel scores/draws before any explicit part selection;
+     *  `_vizSelectedVoiceIndex` below layers the panel-local `sungPart`
+     *  setting on top of it. */
     function _vizScoredIndex(voices) {
         if (!voices || !voices.length) return -1;
         const p = voices.findIndex((v) => v.primary);
         return p >= 0 ? p : 0;
+    }
+
+    /** Resolve the panel-local sung-part setting. Parts are ordered primary
+     *  first, followed by the remaining payload order, so "Part 2" means
+     *  the first harmony even when the primary track wasn't listed first. */
+    function _vizSelectedVoiceIndex(voices, selected) {
+        const primary = _vizScoredIndex(voices);
+        if (primary < 0) return -1;
+        const match = /^part([2-4])$/.exec(String(selected || ''));
+        if (!match) return primary;
+        const ordered = [primary];
+        for (let i = 0; i < voices.length; i++) {
+            if (i !== primary) ordered.push(i);
+        }
+        return ordered[Number(match[1]) - 1] ?? primary;
     }
 
     /** Normalize a voice's tokens into the shape the renderers want.
@@ -2348,6 +2360,21 @@
         });
     }
 
+    function _vizLyricFillStyle(primary, tok, now) {
+        if (!primary) return STAGE_LYRIC_SECONDARY;
+        if (tok.start + (tok.duration || 0) <= now) return BAR_COLOR_FILL;
+        if (tok.start <= now) return '#ffffff';
+        return TEXT_COLOR_PAST;
+    }
+
+    function _vizTrackLyricPosition(state, primary, tok, now, center) {
+        if (!primary || !tok) return;
+        if (tok.start <= now) state.lastX = center;
+        if (tok.start <= now && now < tok.start + (tok.duration || 0)) {
+            state.activeX = center;
+        }
+    }
+
     /** One centred lyric line, per-syllable coloured against `now`:
      *  sung = gold, active = white, upcoming = dim. Shrinks to fit rather
      *  than overflowing the stage. */
@@ -2373,28 +2400,84 @@
         }
         ctx2d.textAlign = 'left';
         ctx2d.textBaseline = 'middle';
-        let x = areaX + (areaW - total) / 2;
+        const x0 = areaX + (areaW - total) / 2;
+        let x = x0;
+        const position = { activeX: null, lastX: null };
         for (let p = 0; p < line.parts.length; p++) {
             const part = line.parts[p];
             const tok = tokens[part.idx];
             const text = piece(part, p);
-            if (!primary) {
-                ctx2d.fillStyle = STAGE_LYRIC_SECONDARY;
-            } else if (tok.start + (tok.duration || 0) <= now) {
-                ctx2d.fillStyle = BAR_COLOR_FILL;      // sung
-            } else if (tok.start <= now) {
-                ctx2d.fillStyle = '#ffffff';           // active syllable
-            } else {
-                ctx2d.fillStyle = TEXT_COLOR_PAST;     // upcoming
-            }
+            ctx2d.fillStyle = _vizLyricFillStyle(primary, tok, now);
             ctx2d.fillText(text, x, y);
-            x += ctx2d.measureText(text).width;
+            const w = ctx2d.measureText(text).width;
+            _vizTrackLyricPosition(position, primary, tok, now, x + w / 2);
+            x += w;
         }
+        if (position.activeX === null) position.activeX = position.lastX;
+        return { x0, x1: x, activeX: position.activeX };
     }
 
-    /** The lyric band below the seam: the current line plus a dim preview
-     *  of the next. The bouncing ball and the silent-lead-in countdown that
-     *  ride under these words are #15 phase 2. */
+    /** Median syllable spacing folded into a beat-like range. The playback
+     *  contract carries no BPM, so the cue uses this stable song-level
+     *  estimate instead of changing tempo with each lyric line. */
+    function _vizComputeCueBeat(tokens) {
+        const diffs = [];
+        for (let i = 1; i < tokens.length; i++) {
+            const d = tokens[i].start - tokens[i - 1].start;
+            if (d > 0.08 && d < 3) diffs.push(d);
+        }
+        let beat = 0.5;
+        if (diffs.length) {
+            diffs.sort((a, b) => a - b);
+            beat = diffs[Math.floor(diffs.length / 2)];
+        }
+        while (beat < 0.4) beat *= 2;
+        while (beat > 0.9) beat /= 2;
+        return beat;
+    }
+
+    /** Karaoke Highway phase-2 cue: bounce beneath the active syllable, or
+     *  beneath a numeric get-ready countdown during a real silent lead-in. */
+    function _vizDrawLyricCue(ctx2d, line, li, lines, now, info, fontPx, cy, railW, u, cue) {
+        if (!cue) return;
+        const gapStart = li > 0 ? lines[li - 1].t1 : 0;
+        const remain = line.t0 - now;
+        let target = null;
+        let countdown = false;
+        if (now < line.t0 && line.t0 - gapStart >= 2 && remain > 0 && remain <= 20) {
+            target = Math.max(railW + fontPx * 0.8, info.x0 - fontPx * 1.3);
+            countdown = true;
+        } else if (info.activeX !== null) {
+            target = info.activeX;
+        }
+        if (target === null) {
+            cue.ballX = null;
+            return;
+        }
+        cue.ballX = cue.ballX === null ? target : cue.ballX + (target - cue.ballX) * 0.18;
+        if (countdown) {
+            ctx2d.fillStyle = 'rgba(120,210,255,0.95)';
+            ctx2d.font = 'bold ' + Math.round(fontPx * 1.1) + 'px sans-serif';
+            ctx2d.textAlign = 'center';
+            ctx2d.textBaseline = 'middle';
+            ctx2d.fillText(remain.toFixed(1), target, cy);
+        }
+        const beat = cue.beat || 0.5;
+        const bounce = Math.abs(Math.sin(Math.PI * (now - line.t0) / beat));
+        const ballY = cy + fontPx * 0.8 - fontPx * 0.28 * bounce;
+        const radius = Math.max(3, fontPx * 0.16);
+        ctx2d.save();
+        ctx2d.shadowColor = 'rgba(150,210,255,0.85)';
+        ctx2d.shadowBlur = 6 * u;
+        ctx2d.fillStyle = '#eaf4ff';
+        ctx2d.beginPath();
+        ctx2d.arc(cue.ballX, ballY, radius, 0, Math.PI * 2);
+        ctx2d.fill();
+        ctx2d.restore();
+    }
+
+    /** The lyric band below the seam: current line, dim next-line preview,
+     *  bouncing syllable cue, and silent-lead-in countdown (#15 phase 2). */
     // First line index NOT yet finished (plus a 0.3s hold so the last
     // syllable doesn't vanish the instant it's sung) — i.e. the first
     // `lines[i].t1 > now - 0.3`. `lines` is sorted by t1 (built sequentially
@@ -2416,7 +2499,7 @@
         return lo;
     }
 
-    function _vizDrawLyricBand(ctx2d, tokens, lines, now, railW, W, H, seamY, u) {
+    function _vizDrawLyricBand(ctx2d, tokens, lines, now, railW, W, H, seamY, u, cue) {
         if (!lines || !lines.length) return;
         const li = _vizActiveLyricLineIndex(lines, now);
         if (li >= lines.length) return;
@@ -2424,18 +2507,33 @@
         const fontPx = Math.max(16, Math.round(Math.min(36 * u, 44)));
         const areaX = railW;
         const areaW = W - railW;
-        _vizDrawLyricLine(ctx2d, tokens, lines[li], now, areaX, areaW, fontPx, cy, true);
+        const info = _vizDrawLyricLine(ctx2d, tokens, lines[li], now,
+            areaX, areaW, fontPx, cy, true);
         if (li + 1 < lines.length) {
             _vizDrawLyricLine(ctx2d, tokens, lines[li + 1], now, areaX, areaW,
                 Math.max(12, Math.round(fontPx * 0.55)), cy + fontPx * 1.4, false);
         }
+        _vizDrawLyricCue(ctx2d, lines[li], li, lines, now, info,
+            fontPx, cy, railW, u, cue);
+    }
+
+    function _vizDrawSelectedVoiceLabel(ctx2d, voices, scoredIdx, railW, wallTop, topStatsH, u) {
+        if (voices.length <= 1 || !voices[scoredIdx]) return;
+        const selected = voices[scoredIdx];
+        ctx2d.fillStyle = 'rgba(216,180,254,0.9)';
+        ctx2d.font = 'bold ' + Math.max(9, Math.round(11 * u)) + 'px sans-serif';
+        ctx2d.textAlign = 'left';
+        ctx2d.textBaseline = 'middle';
+        ctx2d.fillText('SING: ' + String(selected.name || selected.id).toUpperCase(),
+            railW + 8 * u, wallTop + topStatsH / 2);
     }
 
     /** The perspective stage: note wall, diatonic lanes, horizon seam,
      *  duet guide bars, violet note slabs, playhead, lyric band.
      *
-     *  Pure in its inputs (no DOM reads, no module state) so it stays
-     *  per-panel and unit-testable, and windowed per frame — `tokens` is
+     *  No DOM reads or shared module state: the only animation state is the
+     *  panel-local `view.cue`. The draw stays unit-testable and windowed per
+     *  frame — `tokens` is
      *  start-sorted, so each voice is entered at a lower bound and left on
      *  the first token past the right edge. `lookbehind` is the song's
      *  longest token so a note held across the window's left edge still
@@ -2483,6 +2581,8 @@
         wg.addColorStop(1, STAGE_WALL_BOTTOM);
         ctx2d.fillStyle = wg;
         ctx2d.fillRect(0, 0, W, seamY);
+        _vizDrawSelectedVoiceLabel(ctx2d, voices, view.scoredIdx,
+            railW, wallTop, topStatsH, u);
         ctx2d.lineWidth = 1;
         ctx2d.font = Math.max(8, Math.round(9 * u)) + 'px sans-serif';
         ctx2d.textAlign = 'left';
@@ -2580,7 +2680,7 @@
         ctx2d.lineTo(playheadX, seamY);
         ctx2d.stroke();
 
-        _vizDrawLyricBand(ctx2d, tokens, view.lines, now, railW, W, H, seamY, u);
+        _vizDrawLyricBand(ctx2d, tokens, view.lines, now, railW, W, H, seamY, u, view.cue);
 
         ctx2d.restore();
     }
@@ -2598,6 +2698,7 @@
         let stageRange = null;    // diatonic axis, shared across voices
         let lines = null;         // lyric lines, built once per load
         let maxDuration = 0;
+        const cue = { beat: 0.5, ballX: null }; // panel-local animation state
         let loadedKey = null;      // key we have data for
         let requestedKey = null;   // key a load is in flight for
         // Key whose load already failed. Without this, `draw` — which
@@ -2611,6 +2712,18 @@
         let loadSeq = 0;           // monotonic; stale responses drop themselves
         let abortCtl = null;
         const settings = Object.assign({}, VIZ_SETTING_DEFAULTS);
+
+        function selectVoice() {
+            scoredIdx = _vizSelectedVoiceIndex(voices, settings.sungPart);
+            tokens = scoredIdx >= 0 ? voices[scoredIdx].tokens : [];
+            stageRange = voices.length > 1
+                ? _vizSharedDiatonicRange(voices)
+                : _vizDiatonicRange(tokens);
+            lines = _vizBuildLines(tokens);
+            maxDuration = _vizMaxDurationAcrossVoices(voices);
+            cue.beat = _vizComputeCueBeat(tokens);
+            cue.ballX = null;
+        }
 
         function abortInflight() {
             if (abortCtl) {
@@ -2627,6 +2740,8 @@
             stageRange = null;
             lines = null;
             maxDuration = 0;
+            cue.beat = 0.5;
+            cue.ballX = null;
             loadedKey = null;
         }
 
@@ -2671,15 +2786,7 @@
                     return;
                 }
                 voices = _vizNormalizeVoices(res.body);
-                scoredIdx = _vizScoredIndex(voices);
-                tokens = scoredIdx >= 0 ? voices[scoredIdx].tokens : [];
-                // One axis across every voice so a duet's guides share lanes
-                // with the scored voice instead of each being auto-ranged.
-                stageRange = voices.length > 1
-                    ? _vizSharedDiatonicRange(voices)
-                    : _vizDiatonicRange(tokens);
-                lines = _vizBuildLines(tokens);
-                maxDuration = _vizMaxDurationAcrossVoices(voices);
+                selectVoice();
                 loadedKey = key;
                 _vizEmit('lyrics_karaoke:renderer-ready', {
                     filename,
@@ -2784,6 +2891,7 @@
                         tokens,
                         lines,
                         maxDuration,
+                        cue,
                     }, now);
                     return;
                 }
@@ -2826,6 +2934,7 @@
             applySetting(key, value) {
                 if (!Object.prototype.hasOwnProperty.call(VIZ_SETTING_DEFAULTS, key)) return false;
                 settings[key] = value;
+                if (key === 'sungPart' && voices.length) selectVoice();
                 return true;
             },
 
@@ -2905,6 +3014,7 @@
             _vizSongKey,
             _vizNormalizeVoices,
             _vizScoredIndex,
+            _vizSelectedVoiceIndex,
             _vizNormalizeTokens,
             _vizDiaPos,
             _vizIsNatural,
@@ -2913,6 +3023,7 @@
             _vizSharedDiatonicRange,
             _vizBuildLines,
             _vizActiveLyricLineIndex,
+            _vizComputeCueBeat,
             _vizDrawStage,
             stripSyllableMarker,
             _vizPitchRange,

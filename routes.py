@@ -194,11 +194,11 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
 #
 # One versioned shape for the player renderer to consume, covering today's
 # single-singer sloppaks, lyrics-only sloppaks (no vocal_pitch.json), and —
-# once a `vocal_parts`-shaped manifest key clears the feedpak-spec FEP
-# process (tracked in #10) — multi-voice/duet packs. Until that key exists,
-# every pack surfaces as a single ``primary`` voice built from the existing
-# ``lyrics``/``vocal_pitch`` manifest keys, so this endpoint stays fully
-# backward compatible with every sloppak `/data` already serves.
+# multi-voice/duet packs authored with the additive ``vocal_tracks``
+# extension used by Karaoke Highway/feedpakr. The feedpak v1 spec requires
+# Readers to ignore unknown additive keys, so older readers keep using the
+# singular ``lyrics``/``vocal_pitch`` aliases while this endpoint can expose
+# every singer. Packs without the extension retain the exact solo behavior.
 #
 # Unlike `_lyrics_tokens`/`_read_pitch_file` (tolerant — used by `/status`
 # and the legacy `/data` overlay, which must keep degrading quietly), this
@@ -297,6 +297,70 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     return tokens
 
 
+def _canonical_voices(source_dir: Path, manifest: dict) -> list[dict]:
+    """Build canonical voice streams from ``vocal_tracks`` or solo aliases.
+
+    PROVENANCE: the ``vocal_tracks`` merge shape (per-entry ``id``/``name``/
+    ``primary``/``lyrics``/``vocal_pitch``, exactly-one-primary guarantee) is
+    adapted from Karaoke Highway's ``_build_voices``
+    (https://github.com/Taynavv/feedback-vocals-viz, `routes.py`,
+    AGPL-3.0) — the reference implementation this epic absorbs (#18). See
+    docs/architecture/vocals-visualization-integration.md's Provenance
+    section for the reciprocal direction (this plugin's overlay geometry,
+    ported the other way into that repo).
+
+    ``vocal_tracks`` is an additive manifest extension shared with that
+    reference implementation. Each entry carries ``id``, optional
+    ``name``/``primary``, and its own ``lyrics``/``vocal_pitch`` pointers.
+    Invalid non-mapping/empty entries are ignored like unusable token rows;
+    duplicate ids are rejected because panel-local selection requires
+    stable, unambiguous identity. Exactly one returned voice is primary
+    (first flagged, otherwise first usable voice).
+    """
+    voices: list[dict] = []
+    tracks = manifest.get("vocal_tracks")
+    if isinstance(tracks, list) and tracks:
+        seen_ids: set[str] = set()
+        primary_seen = False
+        for entry in tracks:
+            if not isinstance(entry, dict):
+                continue
+            tokens = _canonical_voice_tokens(source_dir, entry)
+            if not tokens:
+                continue
+            raw_id = _coerce_stringlike(entry.get("id"))
+            voice_id = raw_id.strip() if raw_id is not None else f"v{len(voices) + 1}"
+            if not voice_id:
+                voice_id = f"v{len(voices) + 1}"
+            if voice_id in seen_ids:
+                raise PlaybackPayloadError(422, f"Duplicate vocal track id: {voice_id}")
+            seen_ids.add(voice_id)
+            raw_name = _coerce_stringlike(entry.get("name"))
+            is_primary = bool(entry.get("primary")) and not primary_seen
+            if is_primary:
+                primary_seen = True
+            voices.append({
+                "id": voice_id,
+                "name": raw_name.strip() if raw_name and raw_name.strip() else None,
+                "primary": is_primary,
+                "tokens": tokens,
+            })
+        if voices:
+            if not primary_seen:
+                voices[0]["primary"] = True
+            return voices
+
+    tokens = _canonical_voice_tokens(source_dir, manifest)
+    if not tokens:
+        return []
+    return [{
+        "id": "primary",
+        "name": "Vocals",
+        "primary": True,
+        "tokens": tokens,
+    }]
+
+
 def _coerce_stringlike(value: object) -> str | None:
     """``str(value)`` for a value that's genuinely string-or-int-shaped,
     else ``None``. Excludes ``bool`` — a Python ``bool`` is an ``int``
@@ -356,15 +420,7 @@ def _build_playback_payload(
     lyrics tokens at all — callers treat that as "not found" (404), not a
     server error, since an unprepared song is a normal, expected state.
     """
-    tokens = _canonical_voice_tokens(source_dir, manifest)
-    voices = []
-    if tokens:
-        voices.append({
-            "id": "primary",
-            "name": "Vocals",
-            "primary": True,
-            "tokens": tokens,
-        })
+    voices = _canonical_voices(source_dir, manifest)
     return {
         "schema_version": PLAYBACK_SCHEMA_VERSION,
         "song": {"filename": filename},

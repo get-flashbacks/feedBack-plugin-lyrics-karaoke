@@ -56,17 +56,32 @@ unpitched. Missing `midi` means “lyrics only”; it is not an error.
 - The route only reads prepared files. It must never run pitch extraction,
   load an audio model, or touch microphone state.
 
-## Current and future voice sources
+## Voice sources
 
-The current feedpak contract supplies one voice through the singular
-`lyrics` and optional `vocal_pitch` manifest keys. The response is still
-a list so a future feedpak specification can add multiple voices without
-changing the top-level shape.
+Solo packs use the standard singular `lyrics` and optional `vocal_pitch`
+manifest keys. Duet packs may additionally use the additive `vocal_tracks`
+extension shared with Karaoke Highway/feedpakr:
 
-Do not read an undocumented `vocal_tracks` manifest extension. Duet
-ingestion is blocked on a feedpak-spec change; until that change lands,
-the route must remain compatible with existing prepared songs and return
-one primary voice.
+```yaml
+lyrics: lyrics_lead.json                 # backward-compatible primary alias
+vocal_pitch: vocal_pitch_lead.json
+vocal_tracks:
+  - id: lead
+    name: Lead
+    primary: true
+    lyrics: lyrics_lead.json
+    vocal_pitch: vocal_pitch_lead.json
+  - id: harmony
+    name: Harmony
+    lyrics: lyrics_harmony.json
+    vocal_pitch: vocal_pitch_harmony.json
+```
+
+The extension follows feedpak v1's additive-extension rule: older readers
+ignore `vocal_tracks` and continue through the singular aliases. This route
+uses the tracks when at least one has usable lyrics, guarantees exactly one
+primary voice, and rejects duplicate voice ids. If no usable track exists,
+it falls back to the singular keys.
 
 ## Consumer obligations
 

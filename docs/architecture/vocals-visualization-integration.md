@@ -33,7 +33,7 @@ data contract before writing code.
   contract the new provider consumes; it runs no extraction or model
   loading, only reads already-persisted `lyrics.json` / `vocal_pitch.json`.
 
-### Visualization provider (#14 shipped, #15 pending) — owns playback
+### Visualization provider (#14 shipped, #15 in progress) — owns playback
 
 - Registers `renderer.create`/`renderer.destroy` under the **existing**
   plugin id `lyrics_karaoke` (see [Manifest scope](#manifest-scope-one-plugin-two-roles)).
@@ -46,24 +46,27 @@ data contract before writing code.
 replaced by the ported stage — note wall, diatonic (piano-key) pitch axis
 with natural-lane labels, horizon seam, violet lit-slab notes with gloss,
 duet guide bars, playhead, and the lyric band below the seam with
-per-syllable sung/active/upcoming colouring. All of it is a pure function
-of a per-panel view object (no DOM reads, no module state), windowed per
-frame by lower-bound entry plus a longest-token lookbehind.
+per-syllable sung/active/upcoming colouring. It reads no DOM or shared
+module state and is windowed per frame by lower-bound entry plus a
+longest-token lookbehind.
+
+**#15 phase 2 cues (shipped):** the lyric band now includes a bouncing
+syllable cue and a numeric get-ready countdown during silent lead-ins. Its
+beat estimate and smoothed horizontal position are renderer-instance state,
+reset on song changes, so splitscreen panels cannot move one another's cue.
 
 Deliberately deferred so each phase stays independently reviewable:
-countdown, bouncing ball and the summary card are **phase 2**; the
-key-rail tuner and voice-technique panels are **phase 3** (the stage
+the scoring-backed summary card remains in **phase 2**; the key-rail tuner
+and voice-technique panels are **phase 3** (the stage
 reserves a narrow rail for them); and the accuracy tint on the sung
 portion of a slab, the sung-pitch trace, and the top stats band are
 **#11**, since they need scored results — the band's height is reserved at
 the reference's value so adding it moves no notes.
 
 Multi-voice is *rendered* here (scored voice as slabs, the rest as
-secondary flat guide bars on one shared axis) and exercised by synthetic
-multi-voice payloads in the tests, but nothing on this path invents
-voices: `/playback` builds `voices[]` from the singular spec'd keys and
-returns exactly one today. A test asserts `screen.js` never reads
-`vocal_tracks`, so duet **ingestion** stays FEP-gated as decided above.
+secondary flat guide bars on one shared axis). `/playback` translates
+`vocal_tracks[]` into the canonical `voices[]` payload; `screen.js` stays
+transport-only and never reads manifest extensions itself.
 - Auto-selects for Vocals arrangements (see [Renderer
   selection](#renderer-selection)).
 
@@ -212,7 +215,7 @@ the index with a null identity rather than failing — the tokens are still
 correct. A negative index is a 422, since no arrangement list can satisfy
 it. Adding `id`/`name` is additive, so `schema_version` stays `1`.
 
-### Multi-voice (duet) — deferred to a spec change, not silently adopted
+### Multi-voice (duet) — additive extension
 
 feedpak-spec (`spec/feedpak-v1.md` §5.5 `lyric_tracks[]`, §7.1 `lyrics.json`,
 §7.2 `vocal_pitch.json` — the token contract above lives in §7.1/§7.2, not
@@ -222,8 +225,8 @@ time of writing — re-verify against whatever tag is current when reading
 this). `lyric_tracks[]` exists but models language variants of one
 performance (original/transliteration/translation) and the spec explicitly
 states "Per-track vocal pitch is out of scope for this version" — still
-true as of 1.19.0. Karaoke Highway's `routes.py` already reads a non-spec
-manifest extension to support duets:
+true as of 1.19.0. The additive manifest extension used by Karaoke
+Highway/feedpakr supports duets:
 
 ```yaml
 vocal_tracks:
@@ -238,26 +241,13 @@ vocal_tracks:
     vocal_pitch: vocal_pitch_v2.json
 ```
 
-This is exactly the drift `feedBack/CLAUDE.md`'s feedpak-spec-gate section
-warns against ("a change is not part of the format until it lands [in the
-spec]" — see the `original_audio` / #933 cautionary tale). **Decision:**
-`vocal_tracks[]` (or a renamed/adjusted form, e.g. aligned with the
-`lyric_tracks[]` naming already in the spec) must go through the
-[feedpak-spec FEP process](https://github.com/got-feedback/feedpak-spec/blob/main/CONTRIBUTING.md)
-— proposal issue, then a spec PR — before `/playback` reads it. Until that
-FEP lands:
-
-- `/playback` keeps surfacing exactly one `primary` voice, built from the
-  existing singular `lyrics`/`vocal_pitch` manifest keys, exactly as it
-  does today.
-- Issue #13's "two vocal parts" fixture, and #16 (duet/splitscreen
-  playback), stay blocked on the FEP landing — not on any code in this
-  repo. That dependency is recorded here explicitly instead of living only
-  as a comment in `routes.py`.
-- When the FEP lands, `_build_playback_payload` extends to read the new key
-  the same way Karaoke Highway's `_build_voices` does, producing multiple
-  `voices[]` entries; the schema above already has room for this without a
-  `schema_version` bump (`voices` is already a list).
+This remains an extension rather than a normative feedpak field. It follows
+the specification's additive-extension rule: the singular keys MUST alias
+the primary part so older readers remain functional, while aware readers
+may consume all tracks. `/playback` now translates the extension into its
+existing `voices[]` transport shape without a schema-version bump. The
+renderer draws every voice on one scale and its per-panel `sungPart` setting
+selects which voice receives the primary slab/lyric treatment.
 
 ## Renderer selection
 
@@ -440,7 +430,7 @@ Both directions of this port stay AGPL-3.0:
   comments crediting `feedBack-plugin-lyrics-karaoke`.
 - Code adapted **back** from Karaoke Highway into this plugin (the ported
   renderer visuals in #15, the multi-voice merge shape in
-  `_build_voices` once the FEP lands) must carry the reciprocal provenance
+  `_canonical_voices`) carries the reciprocal provenance
   comment crediting `Taynavv/feedback-vocals-viz`, per this epic's stated
   requirement to "preserve AGPL attribution and provenance for adapted
   code."
@@ -460,8 +450,8 @@ Dependent issues should follow the same style:
 - #11 (mic/scoring consolidation): pure unit tests for YIN helpers,
   octave-free distance, tolerance boundaries, timing offsets, seek-back
   reset — no live microphone needed.
-- #16 (duet/splitscreen), once unblocked by the FEP: two-vocal-part
-  fixtures using the eventual spec'd multi-voice key.
+- #16 (duet/splitscreen): two-vocal-part fixtures using `vocal_tracks`,
+  independent panel selection, a shared scale, and teardown coverage.
 - Full CI/manual-matrix gate lives in #17's Definition of Done; this
   document does not duplicate that checklist.
 
@@ -470,7 +460,7 @@ Dependent issues should follow the same style:
 - Epic: [#18](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/18)
 - [#11](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/11) — Audio: consolidate microphone pitch detection and scoring
 - [#12](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/12) — Compatibility: preserve workflows and migrate the legacy overlay
-- [#13](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/13) — Backend: canonical multi-voice playback payload (single-voice shape shipped; multi-voice blocked on the FEP above)
+- [#13](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/13) — Backend: canonical multi-voice playback payload
 - [#14](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/14) — Integration: register as a visualization provider
 - [#15](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/15) — Renderer: port the Karaoke Highway visual experience
 - [#16](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/16) — Playback: duet and splitscreen support

@@ -54,6 +54,7 @@ function makeCanvas(opts) {
         texts: [],
         gradients: [],
         fills: [],
+        arcs: [],
         clearRect() { this.calls.push('clearRect'); },
         fillRect(x, y, w, h) {
             this.calls.push('fillRect');
@@ -72,6 +73,7 @@ function makeCanvas(opts) {
         clip() {},
         moveTo() {},
         lineTo() {},
+        arc(x, y, r) { this.calls.push('arc'); this.arcs.push({ x, y, r }); },
         arcTo() {},
         quadraticCurveTo() {},
         stroke() { this.calls.push('stroke'); },
@@ -1002,9 +1004,8 @@ test('drops voices with no usable tokens', () => {
 });
 
 test('reads ONLY voices[] — never a non-spec content path', () => {
-    // Duet ingestion is FEP-gated: rendering multiple voices is supported,
-    // but nothing here may read `vocal_tracks` (the reference plugin's
-    // non-spec manifest extension) or any other off-spec key.
+    // The backend translates the additive manifest extension. Rendering
+    // stays transport-only and must never inspect `vocal_tracks` itself.
     const voices = screen._vizNormalizeVoices({
         vocal_tracks: [
             { id: 'v1', lyrics: 'lyrics.json' },
@@ -1016,7 +1017,7 @@ test('reads ONLY voices[] — never a non-spec content path', () => {
     const src = require('node:fs').readFileSync(
         path.join(__dirname, '..', 'screen.js'), 'utf8',
     );
-    // Allowed in prose (the comment explaining the gate); never as a read.
+    // Allowed in prose (the boundary comment); never as a property read.
     assert.ok(!/\.vocal_tracks|\['vocal_tracks'\]|\["vocal_tracks"\]/.test(src),
         'screen.js must not read vocal_tracks');
 });
@@ -1024,6 +1025,19 @@ test('reads ONLY voices[] — never a non-spec content path', () => {
 test('scored index is -1 when there are no voices', () => {
     assert.strictEqual(screen._vizScoredIndex([]), -1);
     assert.strictEqual(screen._vizScoredIndex(null), -1);
+});
+
+test('panel sung-part selection orders the primary voice first', () => {
+    const voices = [
+        { id: 'harmony', primary: false },
+        { id: 'lead', primary: true },
+        { id: 'counter', primary: false },
+    ];
+    assert.strictEqual(screen._vizSelectedVoiceIndex(voices, 'primary'), 1);
+    assert.strictEqual(screen._vizSelectedVoiceIndex(voices, 'part2'), 0);
+    assert.strictEqual(screen._vizSelectedVoiceIndex(voices, 'part3'), 2);
+    assert.strictEqual(screen._vizSelectedVoiceIndex(voices, 'part4'), 1,
+        'an unavailable part falls back to primary');
 });
 
 // ── Phase 1: lyric line grouping ────────────────────────────────────────
@@ -1063,6 +1077,16 @@ test('line bounds span first onset to last offset', () => {
     ]);
     assert.strictEqual(lines[0].t0, 1);
     assert.strictEqual(lines[0].t1, 2.25);
+});
+
+test('cue beat uses median syllable spacing and folds subdivisions', () => {
+    assert.strictEqual(screen._vizComputeCueBeat([]), 0.5);
+    assert.strictEqual(screen._vizComputeCueBeat([
+        { start: 0 }, { start: 0.2 }, { start: 0.4 }, { start: 0.6 },
+    ]), 0.4, 'a 0.2s subdivision folds to a 0.4s beat');
+    assert.strictEqual(screen._vizComputeCueBeat([
+        { start: 0 }, { start: 0.6 }, { start: 1.2 },
+    ]), 0.6);
 });
 
 // ── Phase 1: the stage ──────────────────────────────────────────────────
@@ -1133,6 +1157,31 @@ test('the active syllable, sung syllables and upcoming ones differ', () => {
     for (const t of ctx.texts) byText[t.t.trim()] = t.fill;
     assert.strictEqual(byText.lo, '#ffffff', 'active syllable is white');
     assert.notStrictEqual(byText.hel, byText.lo, 'sung syllable differs from active');
+});
+
+test('the stage shows a countdown and bouncing ball during a silent lead-in', () => {
+    const tokens = [{ start: 4, duration: 0.5, text: 'ready', midi: 60 }];
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const view = stageView({
+        tokens,
+        voices: [{ id: 'p', primary: true, tokens }],
+        cue: { beat: 0.5, ballX: null },
+    });
+    screen._vizDrawStage(canvas._ctx, 960, 480, view, 2.5);
+
+    assert.ok(canvas._ctx.texts.some((t) => t.t === '1.5'),
+        'countdown reports seconds until the first lyric');
+    assert.strictEqual(canvas._ctx.arcs.length, 1, 'one bouncing-ball cue is drawn');
+});
+
+test('the bouncing ball follows the active syllable without a countdown', () => {
+    const canvas = makeCanvas({ width: 960, height: 480 });
+    const view = stageView({ cue: { beat: 0.5, ballX: null } });
+    screen._vizDrawStage(canvas._ctx, 960, 480, view, 1.2);
+
+    assert.strictEqual(canvas._ctx.arcs.length, 1);
+    assert.ok(!canvas._ctx.texts.some((t) => /^\d+\.\d$/.test(t.t)),
+        'numeric countdown disappears once singing begins');
 });
 
 test('a duet renders guide bars for the unscored voice on shared lanes', () => {
@@ -1294,6 +1343,47 @@ test('renderer-ready reports the scored voice id', async () => {
     assert.strictEqual(ready.voiceId, 'harm', 'scores the explicit primary');
     assert.strictEqual(ready.voices, 2);
     r.destroy();
+});
+
+test('each renderer panel can select a different duet part', async () => {
+    const payload = {
+        schema_version: 1,
+        song: { filename: 'duet.sloppak' },
+        arrangement: { index: 0, id: 'vocals', name: 'Vocals' },
+        voices: [
+            { id: 'lead', name: 'Lead', primary: true,
+              tokens: [{ start: 1, duration: 1, text: 'lead+', midi: 60 }] },
+            { id: 'harmony', name: 'Harmony', primary: false,
+              tokens: [{ start: 1, duration: 1, text: 'harmony+', midi: 67 }] },
+        ],
+    };
+    fetchImpl = jsonFetch(payload);
+    const lead = window.feedBackViz_lyrics_karaoke();
+    const harmony = window.feedBackViz_lyrics_karaoke();
+    const leadCanvas = makeCanvas({ width: 960, height: 480 });
+    const harmonyCanvas = makeCanvas({ width: 960, height: 480 });
+    assert.strictEqual(harmony.applySetting('sungPart', 'part2'), true);
+    lead.init(leadCanvas, bundle());
+    harmony.init(harmonyCanvas, bundle());
+    await flush();
+
+    lead.draw(bundle({ currentTime: 1.2 }));
+    harmony.draw(bundle({ currentTime: 1.2 }));
+    assert.ok(leadCanvas._ctx.texts.some((t) => t.t.trim() === 'lead'));
+    assert.ok(leadCanvas._ctx.texts.some((t) => t.t === 'SING: LEAD'));
+    assert.ok(!leadCanvas._ctx.texts.some((t) => t.t.trim() === 'harmony'));
+    assert.ok(harmonyCanvas._ctx.texts.some((t) => t.t.trim() === 'harmony'));
+    assert.ok(harmonyCanvas._ctx.texts.some((t) => t.t === 'SING: HARMONY'));
+    assert.ok(!harmonyCanvas._ctx.texts.some((t) => t.t.trim() === 'lead'));
+
+    // Switching an already-loaded panel rebuilds only that panel's lyric
+    // lines; the other instance keeps its own selected voice.
+    harmonyCanvas._ctx.texts.length = 0;
+    harmony.applySetting('sungPart', 'primary');
+    harmony.draw(bundle({ currentTime: 1.2 }));
+    assert.ok(harmonyCanvas._ctx.texts.some((t) => t.t.trim() === 'lead'));
+    lead.destroy();
+    harmony.destroy();
 });
 
 // ── The shared syllable-marker helper (one impl, two token shapes) ──────
