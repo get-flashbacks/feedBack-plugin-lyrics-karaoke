@@ -58,6 +58,17 @@ function sine(freq, sampleRate, n, phase0) {
     return out;
 }
 
+function createWebAudioMocks(ctx) {
+    // Shared factory for Web Audio API mocks (createMediaStreamSource, createScriptProcessor, createGain).
+    // Mocks are attached directly to ctx to support both makeMicEnv (options-driven) and global AudioContext.
+    ctx.createMediaStreamSource = function () { return { connect() {}, disconnect() {} }; };
+    ctx.createScriptProcessor = function () {
+        ctx.processor = { connect() {}, disconnect() {}, onaudioprocess: null };
+        return ctx.processor;
+    };
+    ctx.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} }; };
+}
+
 // ── YIN helpers ─────────────────────────────────────────────────────────
 
 test('yinDetect finds the fundamental of a clean sine', () => {
@@ -401,13 +412,8 @@ function makeMicEnv(opts) {
             close() { this.closed = true; return Promise.resolve(); },
             suspend() { this.state = 'suspended'; return Promise.resolve(); },
             resume() { if (!o.resumeFails) this.state = 'running'; return Promise.resolve(); },
-            createMediaStreamSource() { return { connect() {}, disconnect() {} }; },
-            createScriptProcessor() {
-                ctx.processor = { connect() {}, disconnect() {}, onaudioprocess: null };
-                return ctx.processor;
-            },
-            createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; },
         };
+        createWebAudioMocks(ctx);
         log.contexts.push(ctx);
         return ctx;
     }
@@ -660,13 +666,8 @@ window.AudioContext = function FakeAudioContext() {
         closed: false,
         destination: {},
         close() { this.closed = true; return Promise.resolve(); },
-        createMediaStreamSource() { return { connect() {}, disconnect() {} }; },
-        createScriptProcessor() {
-            ctx.processor = { connect() {}, disconnect() {}, onaudioprocess: null };
-            return ctx.processor;
-        },
-        createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; },
     };
+    createWebAudioMocks(ctx);
     media.contexts.push(ctx);
     return ctx;
 };

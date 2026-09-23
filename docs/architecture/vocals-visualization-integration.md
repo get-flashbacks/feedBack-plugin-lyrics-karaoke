@@ -477,9 +477,8 @@ there is no second YIN implementation, microphone path, or scorer.
   where per-syllable results become visible. The scorer already exposes
   per-syllable `quality`/`accuracy` (`getScoreResult(i)`), which is what a
   note-state provider would return.
-- **Not in #11:** the score/streak/accuracy band, accuracy tint, sung-pitch
-  trace drawing and end-of-song summary (#15 — the renderer exposes
-  `getScoreStats()` / `getScoreResult(i)` / `getSungTrace()` for them);
+- **Not in #11:** the end-of-song summary (#15 — the renderer exposes
+  `getScoreStats()` / `getScoreResult(i)` / `getSungTrace()` for it);
   per-panel microphone arbitration in splitscreen (#16 — until then the
   mic scores the first live panel with mic feedback on and a pitched
   part).
