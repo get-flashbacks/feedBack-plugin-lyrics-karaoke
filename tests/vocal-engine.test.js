@@ -699,14 +699,14 @@ function songInfo(name) {
     return { filename: name || 'song.sloppak', arrangement_index: 0, arrangement: 'Vocals' };
 }
 
-async function mountPanel(tokens) {
+async function mountPanel(tokens, name) {
     fetchImpl = jsonFetch(payload(tokens || [
         { start: 1, duration: 1, text: 'la', midi: 69 },
         { start: 2, duration: 1, text: 'la', midi: 69 },
     ]));
     const r = window.feedBackViz_lyrics_karaoke();
     const canvas = zeroCanvas();
-    r.init(canvas, { currentTime: 0, songInfo: songInfo() });
+    r.init(canvas, { currentTime: 0, songInfo: songInfo(name) });
     await flush();
     await flush();
     return { r, canvas };
@@ -726,6 +726,43 @@ test('provider: mic starts only from the explicit click and targets a pitched pa
     assert.strictEqual(r.ownsMic(), false);
     assert.ok(media.tracks[media.tracks.length - 1].stopped);
     r.destroy();
+});
+
+test('provider: user can target either vocals panel and live transfer stays exclusive', async () => {
+    const before = media.gum;
+    const { r: first } = await mountPanel(null, 'alpha.sloppak');
+    const { r: second } = await mountPanel(null, 'beta.sloppak');
+
+    assert.match(first.micTargetLabel(), /alpha .* Vocals .* Panel/u);
+    assert.match(second.micTargetLabel(), /beta .* Vocals .* Panel/u);
+    assert.strictEqual(await screen._vizSelectMicTarget(second, false), true);
+    assert.strictEqual(screen._vizMicTarget(), second);
+    assert.strictEqual(await screen._vizOnMicClick(), true);
+    assert.strictEqual(second.ownsMic(), true);
+    assert.strictEqual(first.ownsMic(), false);
+
+    assert.strictEqual(await screen._vizSelectMicTarget(first, true), true);
+    assert.strictEqual(first.ownsMic(), true);
+    assert.strictEqual(second.ownsMic(), false);
+    assert.strictEqual(media.gum, before + 2, 'one capture request per explicit owner');
+    assert.strictEqual(media.tracks.filter((track) => !track.stopped).length, 1,
+        'the previous stream stops before the next panel starts');
+
+    first.destroy();
+    assert.strictEqual(screen._lkMic.getState().state, 'off');
+    assert.strictEqual(screen._vizMicTarget(), second, 'a closed target falls back to a live panel');
+    second.destroy();
+});
+
+test('provider: selecting an ineligible or destroyed panel is rejected', async () => {
+    const { r: pitched } = await mountPanel(null, 'pitched.sloppak');
+    const { r: lyricsOnly } = await mountPanel(
+        [{ start: 1, duration: 1, text: 'la', midi: null }], 'lyrics.sloppak');
+    assert.strictEqual(await screen._vizSelectMicTarget(lyricsOnly, false), false);
+    lyricsOnly.destroy();
+    assert.strictEqual(await screen._vizSelectMicTarget(lyricsOnly, false), false);
+    assert.strictEqual(screen._vizMicTarget(), pitched);
+    pitched.destroy();
 });
 
 test('provider: the legacy overlay cannot take the mic while a panel holds it', async () => {

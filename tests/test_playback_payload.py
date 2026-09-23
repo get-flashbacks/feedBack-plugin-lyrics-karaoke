@@ -254,6 +254,24 @@ def test_duet_rejects_duplicate_voice_ids(tmp_path):
     assert "Duplicate vocal track id" in exc_info.value.message
 
 
+def test_duet_warns_when_legacy_alias_does_not_match_primary(tmp_path, caplog):
+    _write_lyrics_only_tracks(tmp_path, ("lead", "other"))
+    manifest = {
+        "lyrics": "other.json",
+        "vocal_tracks": [
+            {"id": "lead", "primary": True, "lyrics": "lead.json"},
+            {"id": "other", "lyrics": "other.json"},
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=routes._log.name):
+        voices = routes._canonical_voices(tmp_path, manifest)
+
+    assert voices[0]["id"] == "lead"
+    assert "Legacy vocal alias(es) lyrics" in caplog.text
+    assert "primary vocal track 'lead'" in caplog.text
+
+
 def test_empty_vocal_tracks_fall_back_to_singular_aliases(tmp_path):
     (tmp_path / "lyrics.json").write_text(json.dumps([
         {"t": 0.0, "d": 1.0, "w": "solo"},

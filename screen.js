@@ -2474,8 +2474,8 @@
         sungPart: 'primary',
     });
 
-    // Live renderer instances, for ONE purpose: deciding whether the
-    // provider currently owns playback (see `_vizOwnsPlayback`). Every
+    // Live renderer instances support provider playback ownership and the
+    // shared microphone's eligible-panel selector. Every
     // piece of actual renderer state is panel-local, held in
     // `_createVizRenderer`'s closure — a shared module global would make
     // two splitscreen panels overwrite each other.
@@ -2501,15 +2501,27 @@
     //
     // The 🎤 click is the ONLY path to getUserMedia on the provider side —
     // nothing requests the microphone on load, on song change, or from a
-    // restored setting. Until #16's per-panel arbitration lands, the mic
-    // scores the first live panel that can score.
+    // restored setting. In splitscreen the user explicitly chooses which
+    // eligible panel is scored; the selection never opens the microphone
+    // unless capture is already active and the user changes that selector.
     let _vizMicUi = null;
+    let _vizPreferredMicTarget = null;
+
+    function _vizMicCandidates() {
+        const out = [];
+        for (const inst of _vizInstances) {
+            if (inst.canScore()) out.push(inst);
+        }
+        return out;
+    }
 
     function _vizMicTarget() {
-        for (const inst of _vizInstances) {
-            if (inst.canScore()) return inst;
+        const candidates = _vizMicCandidates();
+        if (_vizPreferredMicTarget && candidates.includes(_vizPreferredMicTarget)) {
+            return _vizPreferredMicTarget;
         }
-        return null;
+        _vizPreferredMicTarget = candidates.length ? candidates[0] : null;
+        return _vizPreferredMicTarget;
     }
 
     function _vizMicOwnerInstance() {
@@ -2554,6 +2566,15 @@
 
         const selectStyle = 'font-size:11px;max-width:9rem;background:#1f2937;color:#e5e7eb;'
             + 'border:1px solid #374151;border-radius:4px;padding:1px 2px;';
+        const target = document.createElement('select');
+        target.setAttribute('aria-label', 'Karaoke scoring panel');
+        target.title = 'Which vocals panel the microphone scores';
+        target.setAttribute('style', selectStyle);
+        target.addEventListener('change', () => {
+            const next = _vizMicCandidates().find((inst) => inst.micTargetId() === target.value);
+            if (next) _vizSelectMicTarget(next, true);
+        });
+
         const device = document.createElement('select');
         device.setAttribute('aria-label', 'Karaoke microphone input');
         device.title = 'Microphone input';
@@ -2581,15 +2602,17 @@
         statusEl.style.minWidth = '5rem';
 
         root.appendChild(btn);
+        root.appendChild(target);
         root.appendChild(device);
         root.appendChild(channel);
         root.appendChild(statusEl);
         slot.appendChild(root);
 
         _vizMicUi = {
-            root, btn, device, channel, statusEl,
+            root, btn, target, device, channel, statusEl,
             lastStatus: '',
             devicesKey: '',
+            targetsKey: '',
             unsubscribe: _lkMic.subscribe(() => _vizRefreshMicUi()),
         };
         // Device labels only appear once permission is granted; re-list on
@@ -2633,6 +2656,42 @@
         _vizMicUi.statusEl.textContent = text;
     }
 
+    function _vizPopulateMicTargets() {
+        if (!_vizMicUi) return;
+        const ui = _vizMicUi;
+        const candidates = _vizMicCandidates();
+        const selected = _vizMicTarget();
+        const key = candidates.map((inst) => inst.micTargetId() + ':' + inst.micTargetLabel()).join('|');
+        if (key !== ui.targetsKey) {
+            ui.targetsKey = key;
+            while (ui.target.firstChild) ui.target.removeChild(ui.target.firstChild);
+            candidates.forEach((inst) => {
+                const opt = document.createElement('option');
+                opt.value = inst.micTargetId();
+                opt.textContent = inst.micTargetLabel();
+                ui.target.appendChild(opt);
+            });
+        }
+        ui.target.style.display = candidates.length > 1 ? '' : 'none';
+        ui.target.disabled = candidates.length < 2;
+        ui.target.value = selected ? selected.micTargetId() : '';
+    }
+
+    /** Choose the panel scored by the shared microphone. A user changing
+     *  the selector while capture is live explicitly transfers capture:
+     *  the old stream is fully released before the new owner may start. */
+    function _vizSelectMicTarget(next, transferActive) {
+        if (!_vizInstances.has(next) || !next.canScore()) return Promise.resolve(false);
+        const owner = _vizMicOwnerInstance();
+        _vizPreferredMicTarget = next;
+        if (transferActive && owner && owner !== next) {
+            owner.releaseMic();
+            return next.requestMic();
+        }
+        _vizRefreshMicUi();
+        return Promise.resolve(true);
+    }
+
     /** Per-frame from the owning panel's draw — a text diff, so the DOM is
      *  written only when the readout actually changes. */
     function _vizUpdateMicStatus(scorer) {
@@ -2667,6 +2726,7 @@
         const busy = !ours && snap.ownerId !== null
             && (snap.state === 'requesting' || snap.state === 'listening' || snap.state === 'suspended');
         const target = _vizMicTarget();
+        _vizPopulateMicTargets();
         ui.channel.value = snap.channel;
         ui.btn.setAttribute('aria-pressed', ours && snap.state !== 'error' ? 'true' : 'false');
         if (busy) {
@@ -3637,6 +3697,8 @@
         let lines = null;         // lyric lines, built once per load
         let maxDuration = 0;
         const cue = { beat: 0.5, ballX: null }; // panel-local animation state
+        const panelNumber = ++_vizOwnerSeq;
+        let micSongLabel = 'Vocals';
         let loadedKey = null;      // key we have data for
         let requestedKey = null;   // key a load is in flight for
         // Key whose load already failed. Without this, `draw` — which
@@ -3667,7 +3729,7 @@
         let canvasRef = null;
         let visibilityHandler = null;
         const micOwner = {
-            id: 'viz-' + (++_vizOwnerSeq),
+            id: 'viz-' + panelNumber,
             getClock() {
                 if (!clockWallAt) return clockT;
                 const elapsed = Math.min(0.2, Math.max(0, (_wallNow() - clockWallAt) / 1000));
@@ -3761,6 +3823,10 @@
                     return;
                 }
                 voices = _vizNormalizeVoices(res.body);
+                const name = String(filename || '').split(/[\\/]/).pop();
+                micSongLabel = name
+                    ? name.replace(/\.(?:feedpak|sloppak)$/i, '')
+                    : 'Vocals';
                 selectVoice();
                 loadedKey = key;
                 _vizRefreshMicUi();   // the 🎤 target may only now exist
@@ -3995,6 +4061,13 @@
             },
             releaseMic() { releaseMic(); },
             ownsMic() { return _lkMic.isOwnedBy(micOwner); },
+            micTargetId() { return micOwner.id; },
+            micTargetLabel() {
+                const voice = scoredIdx >= 0 && voices[scoredIdx]
+                    ? (voices[scoredIdx].name || voices[scoredIdx].id || 'Vocals')
+                    : 'Vocals';
+                return micSongLabel + ' — ' + voice + ' · Panel ' + panelNumber;
+            },
         };
     }
 
@@ -4107,6 +4180,7 @@
             _lkOverlayOwner,
             _vizOnMicClick,
             _vizMicTarget,
+            _vizSelectMicTarget,
         };
     }
 })();
