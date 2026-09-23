@@ -765,6 +765,165 @@ test('provider: selecting an ineligible or destroyed panel is rejected', async (
     pitched.destroy();
 });
 
+// ── Selector DOM wiring ────────────────────────────────────────────────
+
+/** Minimal DOM element: children, `value`, attributes and listeners in the
+ *  shape `_vizBuildMicUi`/`_vizPopulateMicTargets` actually touch, without a
+ *  browser. The shared-mic select's option rebuild, value match and change
+ *  routing deserve a real end-to-end exercise, not just a unit drive. */
+function fakeEl(tag) {
+    const el = {
+        tagName: tag,
+        style: {},
+        children: [],
+        parentNode: null,
+        listeners: {},
+        className: '',
+        type: '',
+        title: '',
+        disabled: false,
+        _value: '',
+        _text: '',
+        get firstChild() { return this.children[0] || null; },
+        get value() { return this._value; },
+        set value(v) { this._value = v; },
+        get textContent() { return this._text; },
+        set textContent(v) { this._text = v; },
+        get isConnected() { return this.parentNode !== null; },
+        setAttribute(n, v) { this['attr-' + n] = v; },
+        removeAttribute(n) { delete this['attr-' + n]; },
+        addEventListener(n, fn) { this.listeners[n] = fn; },
+        appendChild(child) {
+            this.children.push(child);
+            child.parentNode = this;
+            return child;
+        },
+        removeChild(child) {
+            const i = this.children.indexOf(child);
+            if (i >= 0) this.children.splice(i, 1);
+            child.parentNode = null;
+            return child;
+        },
+    };
+    return el;
+}
+
+test('provider: the shared mic selector rebuilds options and its change transfers capture', async () => {
+    const realCreate = document.createElement;
+    const realGetById = document.getElementById;
+    const slot = fakeEl('span');
+    document.createElement = fakeEl;
+    document.getElementById = () => slot;
+    const before = media.gum;
+    const panels = [];
+    try {
+        const { r: first } = await mountPanel(null, 'alpha.sloppak');
+        panels.push(first);
+        // init() built the selector with a single candidate.
+        const target = slot.children[0].children[1];
+        assert.strictEqual(target.children.length, 1, 'one option for the only panel');
+        assert.strictEqual(target.disabled, true, 'a single candidate hides the choice');
+        assert.strictEqual(target.style.display, 'none');
+
+        const { r: second } = await mountPanel(null, 'beta.sloppak');
+        panels.push(second);
+        await flush();
+        // The rebuild-key fired: both panels are options and the choice enables.
+        assert.strictEqual(target.children.length, 2, 'the option list was rebuilt for a second panel');
+        assert.deepStrictEqual(
+            target.children.map((o) => o.value),
+            [first.micTargetId(), second.micTargetId()],
+            'option values are the micTargetIds the change handler matches on');
+        assert.strictEqual(target.disabled, false);
+        assert.strictEqual(target.style.display, '');
+
+        // Start scoring the preferred panel, then flip through the select.
+        await screen._vizSelectMicTarget(second, false);
+        await screen._vizOnMicClick();
+        assert.strictEqual(second.ownsMic(), true);
+
+        target.value = first.micTargetId();
+        target.listeners.change();
+        await flush();
+        await flush();
+        assert.strictEqual(first.ownsMic(), true, 'the change routed the transfer to the picked panel');
+        assert.strictEqual(second.ownsMic(), false);
+        assert.strictEqual(media.gum, before + 2, 'one new capture per transfer');
+        assert.strictEqual(media.tracks.filter((t) => !t.stopped).length, 1,
+            'switching panels keeps exactly one live stream');
+
+        // A stale/unmatched value is a no-op: the mic stays put.
+        target.value = 'viz-9999';
+        target.listeners.change();
+        await flush();
+        assert.strictEqual(first.ownsMic(), true, 'an unmatched value does not move the mic');
+
+        first.destroy();
+        panels.splice(panels.indexOf(first), 1);
+        assert.strictEqual(target.disabled, true, 'one panel left hides the selector again');
+    } finally {
+        document.createElement = realCreate;
+        document.getElementById = realGetById;
+        for (const p of panels) p.destroy();
+    }
+});
+
+test('provider: a transfer whose re-grab hits NotReadableError retries once and recovers', async () => {
+    const before = media.gum;
+    const realGum = navigator.mediaDevices.getUserMedia;
+    let calls = 0;
+    let failOn = 1;   // 0-based: click succeeds, the transfer's first grab fails
+    navigator.mediaDevices.getUserMedia = () => {
+        media.gum += 1;
+        if (calls++ === failOn) {
+            return Promise.reject(Object.assign(new Error('in use'), { name: 'NotReadableError' }));
+        }
+        const tr = { stopped: false, stop() { this.stopped = true; }, addEventListener() {} };
+        media.tracks.push(tr);
+        return Promise.resolve({ getTracks: () => [tr] });
+    };
+    const { r: first } = await mountPanel(null, 'first.sloppak');
+    const { r: second } = await mountPanel(null, 'second.sloppak');
+    try {
+        await screen._vizSelectMicTarget(second, false);
+        await screen._vizOnMicClick();
+        assert.strictEqual(second.ownsMic(), true);
+        assert.strictEqual(await screen._vizSelectMicTarget(first, true), true,
+            'the settle + retry wins the fresh stream');
+        assert.strictEqual(first.ownsMic(), true, 'the transfer recovered instead of stranding at error');
+        assert.strictEqual(second.ownsMic(), false);
+        assert.strictEqual(media.gum, before + 3, 'click + failed re-grab + retry re-grab');
+        assert.strictEqual(media.tracks.filter((t) => !t.stopped).length, 1);
+    } finally {
+        navigator.mediaDevices.getUserMedia = realGum;
+        first.destroy();
+        second.destroy();
+    }
+});
+
+test('provider: a transfer does not retry non-transient mic failures', async () => {
+    const before = media.gum;
+    const realGum = navigator.mediaDevices.getUserMedia;
+    const { r: first } = await mountPanel(null, 'first.sloppak');
+    const { r: second } = await mountPanel(null, 'second.sloppak');
+    try {
+        await screen._vizSelectMicTarget(second, false);
+        await screen._vizOnMicClick();
+        navigator.mediaDevices.getUserMedia = () => {
+            media.gum += 1;
+            return Promise.reject(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
+        };
+        assert.strictEqual(await screen._vizSelectMicTarget(first, true), false,
+            'permission denial surfaces without a retry');
+        assert.strictEqual(media.gum, before + 2, 'one failed attempt only');
+        assert.match(screen._lkMic.getState().error, /permission/i);
+    } finally {
+        navigator.mediaDevices.getUserMedia = realGum;
+        first.destroy();
+        second.destroy();
+    }
+});
+
 test('provider: the legacy overlay cannot take the mic while a panel holds it', async () => {
     const { r } = await mountPanel();
     await r.requestMic();

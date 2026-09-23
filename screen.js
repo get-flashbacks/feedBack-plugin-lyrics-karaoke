@@ -756,6 +756,10 @@
     const _LK_FRAME_INTERVAL_MS = 50;
     const _LK_SAMPLE_FRESH_MS = 200;  // stale samples don't draw the user line
     const _LK_TRACE_CAP = 256;        // ~12 s at 50 ms cadence
+    // Transfer settle: after a release, Firefox may not hand the device
+    // driver back synchronously, so the retry (see _vizRequestMicWithSettle)
+    // waits this long before re-requesting the just-freed mic.
+    const _LK_MIC_TRANSFER_SETTLE_MS = 150;
     // Transport gate. The highway clock's AV-drift resync steps backward by
     // a few ms mid-song, so only a sizeable backward jump is a rewind (and
     // wipes the take); smaller backsteps are dropped like a pause. A large
@@ -2686,10 +2690,27 @@
         _vizPreferredMicTarget = next;
         if (transferActive && owner && owner !== next) {
             owner.releaseMic();
-            return next.requestMic();
+            return _vizRequestMicWithSettle(next);
         }
         _vizRefreshMicUi();
         return Promise.resolve(true);
+    }
+
+    /** Request the mic for a transfer target. A release→re-grab inside the
+     *  same tick can land a `NotReadableError` on Firefox — the device
+     *  driver hasn't handed the mic back yet — and the old stream is already
+     *  stopped, so without a retry the transfer would strand the panel at
+     *  `error` with only a manual 🎤 re-click as recovery. Retry ONCE after a
+     *  short settle; any other failure (permission, hardware) surfaces as-is. */
+    function _vizRequestMicWithSettle(next) {
+        return next.requestMic().then((ok) => {
+            if (ok) return ok;
+            const snap = _lkMic.getState();
+            if (snap.state !== 'error' || !/in use or unavailable/i.test(snap.error)) return ok;
+            return new Promise((resolve) => {
+                setTimeout(() => resolve(next.requestMic()), _LK_MIC_TRANSFER_SETTLE_MS);
+            });
+        });
     }
 
     /** Per-frame from the owning panel's draw — a text diff, so the DOM is
