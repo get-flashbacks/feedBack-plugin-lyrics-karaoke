@@ -3045,6 +3045,17 @@
         return max;
     }
 
+    function _vizSongEndAcrossVoices(voices) {
+        let end = 0;
+        for (const v of (voices || [])) {
+            for (const tok of (v.tokens || [])) {
+                const tokEnd = tok.start + (tok.duration || 0);
+                if (tokEnd > end) end = tokEnd;
+            }
+        }
+        return end;
+    }
+
     function _vizEmit(name, detail) {
         const bus = window.feedBack || window.slopsmith;
         if (!bus || typeof bus.emit !== 'function') return;
@@ -3248,7 +3259,7 @@
     }
 
     function _vizDrawSummaryCard(ctx2d, W, H, railW, seamY, u, score) {
-        if (!score || score.live || !score.stats || !score.stats.judged) return;
+        if (!score || !score.finished || !score.stats || !score.stats.judged) return;
         const st = score.stats;
         const w = Math.min(260 * u, Math.max(170 * u, (W - railW) * 0.36));
         const h = 92 * u;
@@ -3683,7 +3694,7 @@
             ctx2d.moveTo(railW, y);
             ctx2d.lineTo(W, y);
             ctx2d.stroke();
-            if (railMode !== 'off') {
+            if (railMode !== 'off' && railMode !== 'absolute') {
                 ctx2d.fillStyle = STAGE_LANE_LABEL;
                 ctx2d.fillText(_vizMidiToName(m), railW + 5 * u, y);
             }
@@ -3810,6 +3821,7 @@
         let stageRange = null;    // diatonic axis, shared across voices
         let lines = null;         // lyric lines, built once per load
         let maxDuration = 0;
+        let songEnd = 0;
         const cue = { beat: 0.5, ballX: null }; // panel-local animation state
         const panelNumber = ++_vizOwnerSeq;
         let micSongLabel = 'Vocals';
@@ -3866,6 +3878,7 @@
                 : _vizDiatonicRange(tokens);
             lines = _vizBuildLines(tokens);
             maxDuration = _vizMaxDurationAcrossVoices(voices);
+            songEnd = _vizSongEndAcrossVoices(voices);
             cue.beat = _vizComputeCueBeat(tokens);
             cue.ballX = null;
         }
@@ -3891,6 +3904,7 @@
             stageRange = null;
             lines = null;
             maxDuration = 0;
+            songEnd = 0;
             cue.beat = 0.5;
             cue.ballX = null;
             loadedKey = null;
@@ -4076,6 +4090,7 @@
                         // scoring — a panel that never sang stays clean.
                         score: (live || scorer.hasResults()) ? {
                             live,
+                            finished: songEnd > 0 && now >= songEnd,
                             stats: scorer.stats(),
                             resultFor: scorer.resultFor,
                             trace: scorer.trace(),
@@ -4277,6 +4292,7 @@
             _vizPitchRange,
             _vizMaxDuration,
             _vizMaxDurationAcrossVoices,
+            _vizSongEndAcrossVoices,
             _vizLowerBound,
             _percentilePitchRange,
             computeSongPitchRange,

@@ -1680,7 +1680,7 @@ test('the stage draws the stats band, accuracy tint and sung trace while scoring
 test('a finished (not live) take shows best streak and no trace past now', () => {
     const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
     screen._vizDrawStage(ctx, 960, 480, stageView({
-        score: scoreView({ live: false, trace: [{ t: 5, midi: 60 }], stats: {
+        score: scoreView({ live: false, finished: true, trace: [{ t: 5, midi: 60 }], stats: {
             score: 0, streak: 0, bestStreak: 7, hits: 0, misses: 1, judged: 1, accuracy: null,
         } }),
     }), 1.2);
@@ -1693,4 +1693,22 @@ test('a finished (not live) take shows best streak and no trace past now', () =>
     screen._vizDrawStage(plain, 960, 480, stageView(), 1.2);
     const strokes = (c) => c.calls.filter((k) => k === 'stroke').length;
     assert.strictEqual(strokes(ctx), strokes(plain), 'future trace points are not drawn');
+});
+
+test('the summary card waits for song completion, not mic release', () => {
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({
+        score: scoreView({ live: false, finished: false }),
+    }), 1.2);
+    assert.ok(!ctx.texts.some((t) => t.t === 'SUMMARY'),
+        'mid-song mic release must not show the finished-take card');
+});
+
+test('the summary card can appear at song end while the mic is still live', () => {
+    const ctx = makeCanvas({ width: 960, height: 480 }).getContext('2d');
+    screen._vizDrawStage(ctx, 960, 480, stageView({
+        score: scoreView({ live: true, finished: true }),
+    }), 2.1);
+    assert.ok(ctx.texts.some((t) => t.t === 'SUMMARY'),
+        'natural song end should show the finished-take card');
 });
