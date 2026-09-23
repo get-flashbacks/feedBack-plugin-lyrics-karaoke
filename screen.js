@@ -2729,6 +2729,46 @@
         _vizSetMicStatus(note + acc + streak);
     }
 
+    function _vizSetMicButtonState(ui, disabled, className, title, status) {
+        ui.btn.disabled = disabled;
+        ui.btn.className = className;
+        ui.btn.title = title;
+        if (status !== undefined) _vizSetMicStatus(status);
+    }
+
+    function _vizApplyMicUiState(ui, snap, ours, busy, target) {
+        ui.channel.value = snap.channel;
+        ui.btn.setAttribute('aria-pressed', ours && snap.state !== 'error' ? 'true' : 'false');
+
+        if (busy) {
+            _vizSetMicButtonState(ui, true, BTN_CLASS_DISABLED,
+                'The microphone is in use elsewhere', '');
+            return;
+        }
+        if (ours && snap.state === 'requesting') {
+            _vizSetMicButtonState(ui, true, BTN_CLASS_DISABLED,
+                'Requesting microphone…', '…');
+            return;
+        }
+        if (ours && (snap.state === 'listening' || snap.state === 'suspended')) {
+            _vizSetMicButtonState(ui, false, BTN_CLASS_ACTIVE,
+                'Stop microphone feedback',
+                snap.state === 'suspended' ? 'paused' : undefined);
+            _vizPopulateDevices();
+            return;
+        }
+        if (snap.state === 'error' && snap.error) {
+            _vizSetMicButtonState(ui, !target, BTN_CLASS_PROMPT,
+                'Microphone error: ' + snap.error + ' (click to retry)', snap.error);
+            return;
+        }
+        _vizSetMicButtonState(ui, !target, target ? BTN_CLASS_PROMPT : BTN_CLASS_DISABLED,
+            target
+                ? 'Sing along: start microphone pitch feedback (asks for permission)'
+                : 'This part has no pitch to sing against',
+            '');
+    }
+
     function _vizRefreshMicUi() {
         let wanted = false;
         for (const inst of _vizInstances) {
@@ -2749,37 +2789,7 @@
             && (snap.state === 'requesting' || snap.state === 'listening' || snap.state === 'suspended');
         const target = _vizMicTarget();
         _vizPopulateMicTargets();
-        ui.channel.value = snap.channel;
-        ui.btn.setAttribute('aria-pressed', ours && snap.state !== 'error' ? 'true' : 'false');
-        if (busy) {
-            ui.btn.disabled = true;
-            ui.btn.className = BTN_CLASS_DISABLED;
-            ui.btn.title = 'The microphone is in use elsewhere';
-            _vizSetMicStatus('');
-        } else if (ours && snap.state === 'requesting') {
-            ui.btn.disabled = true;
-            ui.btn.className = BTN_CLASS_DISABLED;
-            ui.btn.title = 'Requesting microphone…';
-            _vizSetMicStatus('…');
-        } else if (ours && (snap.state === 'listening' || snap.state === 'suspended')) {
-            ui.btn.disabled = false;
-            ui.btn.className = BTN_CLASS_ACTIVE;
-            ui.btn.title = 'Stop microphone feedback';
-            if (snap.state === 'suspended') _vizSetMicStatus('paused');
-            _vizPopulateDevices();
-        } else if (snap.state === 'error' && snap.error) {
-            ui.btn.disabled = !target;
-            ui.btn.className = BTN_CLASS_PROMPT;
-            ui.btn.title = 'Microphone error: ' + snap.error + ' (click to retry)';
-            _vizSetMicStatus(snap.error);
-        } else {
-            ui.btn.disabled = !target;
-            ui.btn.className = target ? BTN_CLASS_PROMPT : BTN_CLASS_DISABLED;
-            ui.btn.title = target
-                ? 'Sing along: start microphone pitch feedback (asks for permission)'
-                : 'This part has no pitch to sing against';
-            _vizSetMicStatus('');
-        }
+        _vizApplyMicUiState(ui, snap, ours, busy, target);
         ui.btn.setAttribute('aria-label', ui.btn.title);
     }
 
@@ -3626,6 +3636,208 @@
             railW + 8 * u, wallTop + topStatsH / 2);
     }
 
+    function _vizStageLayout(W, H, view, now) {
+        const u = H / STAGE_REF_HEIGHT;
+        const wallTop = 8 * u;
+        // Reserved for the score / streak / accuracy band (#11). Kept at the
+        // reference's height so adding it later doesn't move the notes.
+        const topStatsH = 42 * u;
+        const seamY = Math.round(H * STAGE_SEAM_FRAC);
+        const railMode = view.leftRailMode || 'absolute';
+        const railW = railMode === 'off' ? Math.round(10 * u) : Math.round(74 * u);
+        const noteTop = wallTop + topStatsH;
+        const noteBottom = seamY;
+        const dHi = view.range.dHi;
+        const dSpan = Math.max(1, dHi - view.range.dLo);
+        const usable = noteBottom - noteTop;
+        const barH = Math.max(8, Math.min((usable / dSpan) * 0.86, 40 * u));
+        const pxPerSec = W / VISIBLE_SECONDS;
+        const playheadX = railW + (W - railW) * STAGE_PLAYHEAD_FRAC;
+        const lookbehind = view.maxDuration > 0 ? view.maxDuration : 0;
+        const tMin = now - STAGE_PLAYHEAD_FRAC * VISIBLE_SECONDS - 1;
+        const tMax = now + (1 - STAGE_PLAYHEAD_FRAC) * VISIBLE_SECONDS + 1;
+        return {
+            u,
+            wallTop,
+            topStatsH,
+            seamY,
+            railMode,
+            railW,
+            noteTop,
+            noteBottom,
+            dHi,
+            dSpan,
+            usable,
+            barH,
+            playheadX,
+            tMin,
+            tMax,
+            windowStart: tMin - lookbehind,
+            pad: 2 * u,
+            radius: 6 * u,
+            xFor: (t) => playheadX + (t - now) * pxPerSec,
+            yFor: (m) => noteTop + ((dHi - _vizDiaPos(m)) / dSpan) * (usable - barH),
+        };
+    }
+
+    function _vizDrawStageBackdrop(ctx2d, W, view, layout, score) {
+        const wg = ctx2d.createLinearGradient(0, 0, 0, layout.seamY);
+        wg.addColorStop(0, STAGE_WALL_TOP);
+        wg.addColorStop(1, STAGE_WALL_BOTTOM);
+        ctx2d.fillStyle = wg;
+        ctx2d.fillRect(0, 0, W, layout.seamY);
+        _vizDrawSelectedVoiceLabel(ctx2d, view.voices, view.scoredIdx,
+            layout.railW, layout.wallTop, layout.topStatsH, layout.u);
+        if (score) _vizDrawStats(ctx2d, W, layout.railW, layout.wallTop, layout.topStatsH, layout.u, score);
+    }
+
+    function _vizDrawStageLanes(ctx2d, W, range, layout) {
+        ctx2d.lineWidth = 1;
+        ctx2d.font = Math.max(8, Math.round(9 * layout.u)) + 'px sans-serif';
+        ctx2d.textAlign = 'left';
+        ctx2d.textBaseline = 'middle';
+        for (let m = range.midiLo; m <= range.midiHi; m++) {
+            if (!_vizIsNatural(m)) continue;
+            const y = layout.yFor(m) + layout.barH / 2;
+            ctx2d.strokeStyle = STAGE_LANE;
+            ctx2d.beginPath();
+            ctx2d.moveTo(layout.railW, y);
+            ctx2d.lineTo(W, y);
+            ctx2d.stroke();
+            if (layout.railMode !== 'off' && layout.railMode !== 'absolute') {
+                ctx2d.fillStyle = STAGE_LANE_LABEL;
+                ctx2d.fillText(_vizMidiToName(m), layout.railW + 5 * layout.u, y);
+            }
+        }
+    }
+
+    function _vizDrawStageRail(ctx2d, range, layout, score) {
+        if (layout.railMode === 'absolute') {
+            _vizDrawAbsoluteRail(ctx2d, layout.railW, layout.noteTop, layout.noteBottom,
+                layout.yFor, range, layout.barH, layout.u, score);
+            return;
+        }
+        if (layout.railMode === 'technique') {
+            _vizDrawTechniqueRail(ctx2d, layout.railW, layout.noteTop,
+                layout.topStatsH, layout.u, score);
+        }
+    }
+
+    function _vizDrawGuideVoice(ctx2d, voice, colorIndex, layout) {
+        const guideH = Math.max(3, layout.barH * 0.4);
+        const guideR = Math.min(layout.radius, guideH / 2);
+        ctx2d.fillStyle = STAGE_VOICE_COLORS[colorIndex];
+        let gi = _vizLowerBound(voice.tokens, layout.windowStart);
+        for (; gi < voice.tokens.length; gi++) {
+            const gt = voice.tokens[gi];
+            if (gt.start > layout.tMax) break;
+            if (gt.midi === null) continue;
+            if (gt.start + gt.duration < layout.tMin) continue;
+            const gx0 = layout.xFor(gt.start);
+            const gw = Math.max(2, layout.xFor(gt.start + gt.duration) - gx0 - 2 * layout.pad);
+            const gy = layout.yFor(gt.midi) + (layout.barH - guideH) / 2;
+            _vizRoundRect(ctx2d, gx0 + layout.pad, gy, gw, guideH, guideR);
+        }
+    }
+
+    function _vizDrawGuideVoices(ctx2d, voices, scoredIdx, layout) {
+        if (voices.length <= 1) return;
+        // ── Duet guides: every voice EXCEPT the scored one ──
+        for (let vi = 0; vi < voices.length; vi++) {
+            if (vi === scoredIdx) continue;
+            // Index the palette by position among the GUIDES, so the first
+            // guide is always teal whichever voice is scored.
+            const ci = (vi > scoredIdx ? vi - 1 : vi) % STAGE_VOICE_COLORS.length;
+            _vizDrawGuideVoice(ctx2d, voices[vi], ci, layout);
+        }
+    }
+
+    function _vizApplyScoredSlabGradient(ctx2d, y, isActive, isPast, barH, u) {
+        const g = ctx2d.createLinearGradient(0, y, 0, y + barH);
+        if (isActive) {
+            g.addColorStop(0, STAGE_NOTE_TOP);
+            g.addColorStop(1, STAGE_NOTE_DEEP);
+            ctx2d.shadowColor = STAGE_NOTE_MID;
+            ctx2d.shadowBlur = 22 * u;
+        } else if (isPast) {
+            g.addColorStop(0, STAGE_NOTE_MID);
+            g.addColorStop(1, STAGE_NOTE_LOW);
+        } else {
+            g.addColorStop(0, 'rgba(168,85,247,0.6)');
+            g.addColorStop(1, 'rgba(109,40,217,0.5)');
+        }
+        ctx2d.fillStyle = g;
+    }
+
+    function _vizDrawScoredSlabTint(ctx2d, slab, entry, layout) {
+        const tintRight = Math.max(slab.x, Math.min(slab.x + slab.w, layout.playheadX));
+        if (!entry || entry.samplesIn <= 0 || tintRight <= slab.x) return;
+        const [cr, cg, cb] = _vizAccuracyRgb(entry.accuracy);
+        const lift = (v) => Math.round(v + (255 - v) * 0.5);
+        const ag = ctx2d.createLinearGradient(0, slab.y, 0, slab.y + layout.barH);
+        ag.addColorStop(0, `rgb(${lift(cr)}, ${lift(cg)}, ${lift(cb)})`);
+        ag.addColorStop(1, `rgb(${Math.round(cr * 0.8)}, ${Math.round(cg * 0.8)}, ${Math.round(cb * 0.8)})`);
+        ctx2d.fillStyle = ag;
+        _vizRoundRect(ctx2d, slab.x, slab.y, tintRight - slab.x, layout.barH, layout.radius);
+    }
+
+    function _vizDrawScoredSlab(ctx2d, tok, index, now, layout, score) {
+        const end = tok.start + tok.duration;
+        const x0 = layout.xFor(tok.start);
+        const slab = {
+            x: x0 + layout.pad,
+            y: layout.yFor(tok.midi),
+            w: Math.max(2, layout.xFor(end) - x0 - 2 * layout.pad),
+        };
+        const isPast = end <= now;
+        const isActive = tok.start <= now && now < end;
+
+        _vizApplyScoredSlabGradient(ctx2d, slab.y, isActive, isPast, layout.barH, layout.u);
+        _vizRoundRect(ctx2d, slab.x, slab.y, slab.w, layout.barH, layout.radius);
+        ctx2d.shadowBlur = 0;
+
+        // Accuracy tint over the sung portion (left of the playhead), between
+        // the slab and the gloss so it reads lit, not flat — and opaque, so
+        // the violet can't muddy red/amber to purple.
+        if (score && (isPast || isActive)) {
+            _vizDrawScoredSlabTint(ctx2d, slab, score.resultFor(index), layout);
+        }
+
+        ctx2d.fillStyle = isActive ? 'rgba(255,255,255,0.85)' : 'rgba(235,230,255,0.30)';
+        _vizRoundRect(ctx2d, slab.x + 2 * layout.u, slab.y + 1.5 * layout.u,
+            Math.max(1, slab.w - 4 * layout.u), 2.5 * layout.u, 1.5 * layout.u);
+    }
+
+    function _vizDrawScoredSlabs(ctx2d, tokens, now, layout, score) {
+        // ── Scored voice: violet lit slabs ──
+        let i = _vizLowerBound(tokens, layout.windowStart);
+        for (; i < tokens.length; i++) {
+            const tok = tokens[i];
+            if (tok.start > layout.tMax) break;
+            if (tok.midi === null) continue;
+            if (tok.start + tok.duration < layout.tMin) continue;
+            _vizDrawScoredSlab(ctx2d, tok, i, now, layout, score);
+        }
+    }
+
+    function _vizDrawStageTrace(ctx2d, score, now, layout) {
+        if (!score || !score.trace.length) return;
+        const yForF = (m) => layout.noteTop
+            + ((layout.dHi - _vizDiaPosF(m)) / layout.dSpan) * (layout.usable - layout.barH)
+            + layout.barH / 2;
+        _vizDrawTrace(ctx2d, score.trace, now, layout.xFor, yForF, layout.railW,
+            layout.playheadX, layout.noteTop, layout.noteBottom, layout.u);
+    }
+
+    function _vizDrawStagePlayhead(ctx2d, layout) {
+        ctx2d.strokeStyle = STAGE_PLAYHEAD;
+        ctx2d.lineWidth = Math.max(1.5, 2 * layout.u);
+        ctx2d.beginPath();
+        ctx2d.moveTo(layout.playheadX, layout.noteTop - 6 * layout.u);
+        ctx2d.lineTo(layout.playheadX, layout.seamY);
+        ctx2d.stroke();
+    }
+
     /** The perspective stage: note wall, diatonic lanes, horizon seam,
      *  duet guide bars, violet note slabs, playhead, lyric band.
      *
@@ -3637,34 +3849,8 @@
      *  longest token so a note held across the window's left edge still
      *  draws. */
     function _vizDrawStage(ctx2d, W, H, view, now) {
-        const range = view.range;
-        const voices = view.voices;
-        const tokens = view.tokens;
-        const u = H / STAGE_REF_HEIGHT;
-
-        const wallTop = 8 * u;
-        // Reserved for the score / streak / accuracy band (#11). Kept at the
-        // reference's height so adding it later doesn't move the notes.
-        const topStatsH = 42 * u;
-        const seamY = Math.round(H * STAGE_SEAM_FRAC);
-        const railMode = view.leftRailMode || 'absolute';
-        const railW = railMode === 'off' ? Math.round(10 * u) : Math.round(74 * u);
-        const noteTop = wallTop + topStatsH;
-        const noteBottom = seamY;
-
-        const dLo = range.dLo;
-        const dHi = range.dHi;
-        const dSpan = Math.max(1, dHi - dLo);
-        const usable = noteBottom - noteTop;
-        const barH = Math.max(8, Math.min((usable / dSpan) * 0.86, 40 * u));
-        const pxPerSec = W / VISIBLE_SECONDS;
-        const playheadX = railW + (W - railW) * STAGE_PLAYHEAD_FRAC;
-        const xFor = (t) => playheadX + (t - now) * pxPerSec;
-        const yFor = (m) => noteTop + ((dHi - _vizDiaPos(m)) / dSpan) * (usable - barH);
-        const lookbehind = view.maxDuration > 0 ? view.maxDuration : 0;
-        const tMin = now - STAGE_PLAYHEAD_FRAC * VISIBLE_SECONDS - 1;
-        const tMax = now + (1 - STAGE_PLAYHEAD_FRAC) * VISIBLE_SECONDS + 1;
-        const windowStart = tMin - lookbehind;
+        const layout = _vizStageLayout(W, H, view, now);
+        const score = view.score || null;
 
         ctx2d.clearRect(0, 0, W, H);
         ctx2d.save();
@@ -3672,138 +3858,17 @@
         ctx2d.rect(0, 0, W, H);
         ctx2d.clip();
 
-        // ── Wall backdrop + natural pitch lanes ──
-        const wg = ctx2d.createLinearGradient(0, 0, 0, seamY);
-        wg.addColorStop(0, STAGE_WALL_TOP);
-        wg.addColorStop(1, STAGE_WALL_BOTTOM);
-        ctx2d.fillStyle = wg;
-        ctx2d.fillRect(0, 0, W, seamY);
-        _vizDrawSelectedVoiceLabel(ctx2d, voices, view.scoredIdx,
-            railW, wallTop, topStatsH, u);
-        const score = view.score || null;
-        if (score) _vizDrawStats(ctx2d, W, railW, wallTop, topStatsH, u, score);
-        ctx2d.lineWidth = 1;
-        ctx2d.font = Math.max(8, Math.round(9 * u)) + 'px sans-serif';
-        ctx2d.textAlign = 'left';
-        ctx2d.textBaseline = 'middle';
-        for (let m = range.midiLo; m <= range.midiHi; m++) {
-            if (!_vizIsNatural(m)) continue;
-            const y = yFor(m) + barH / 2;
-            ctx2d.strokeStyle = STAGE_LANE;
-            ctx2d.beginPath();
-            ctx2d.moveTo(railW, y);
-            ctx2d.lineTo(W, y);
-            ctx2d.stroke();
-            if (railMode !== 'off' && railMode !== 'absolute') {
-                ctx2d.fillStyle = STAGE_LANE_LABEL;
-                ctx2d.fillText(_vizMidiToName(m), railW + 5 * u, y);
-            }
-        }
-        if (railMode === 'absolute') {
-            _vizDrawAbsoluteRail(ctx2d, railW, noteTop, noteBottom, yFor, range, barH, u, score);
-        } else if (railMode === 'technique') {
-            _vizDrawTechniqueRail(ctx2d, railW, noteTop, topStatsH, u, score);
-        }
-
-        _vizDrawSeam(ctx2d, W, seamY, u);
-
-        const pad = 2 * u;
-        const radius = 6 * u;
-
-        // ── Duet guides: every voice EXCEPT the scored one ──
-        if (voices.length > 1) {
-            const guideH = Math.max(3, barH * 0.4);
-            const guideR = Math.min(radius, guideH / 2);
-            for (let vi = 0; vi < voices.length; vi++) {
-                if (vi === view.scoredIdx) continue;
-                const vt = voices[vi].tokens;
-                // Index the palette by position among the GUIDES, so the
-                // first guide is always teal whichever voice is scored.
-                const ci = (vi > view.scoredIdx ? vi - 1 : vi) % STAGE_VOICE_COLORS.length;
-                ctx2d.fillStyle = STAGE_VOICE_COLORS[ci];
-                let gi = _vizLowerBound(vt, windowStart);
-                for (; gi < vt.length; gi++) {
-                    const gt = vt[gi];
-                    if (gt.start > tMax) break;
-                    if (gt.midi === null) continue;
-                    if (gt.start + gt.duration < tMin) continue;
-                    const gx0 = xFor(gt.start);
-                    const gw = Math.max(2, xFor(gt.start + gt.duration) - gx0 - 2 * pad);
-                    const gy = yFor(gt.midi) + (barH - guideH) / 2;
-                    _vizRoundRect(ctx2d, gx0 + pad, gy, gw, guideH, guideR);
-                }
-            }
-        }
-
-        // ── Scored voice: violet lit slabs ──
-        let i = _vizLowerBound(tokens, windowStart);
-        for (; i < tokens.length; i++) {
-            const tok = tokens[i];
-            if (tok.start > tMax) break;
-            if (tok.midi === null) continue;
-            const end = tok.start + tok.duration;
-            if (end < tMin) continue;
-
-            const x0 = xFor(tok.start);
-            const x = x0 + pad;
-            const w = Math.max(2, xFor(end) - x0 - 2 * pad);
-            const y = yFor(tok.midi);
-            const isPast = end <= now;
-            const isActive = tok.start <= now && now < end;
-
-            const g = ctx2d.createLinearGradient(0, y, 0, y + barH);
-            if (isActive) {
-                g.addColorStop(0, STAGE_NOTE_TOP);
-                g.addColorStop(1, STAGE_NOTE_DEEP);
-                ctx2d.shadowColor = STAGE_NOTE_MID;
-                ctx2d.shadowBlur = 22 * u;
-            } else if (isPast) {
-                g.addColorStop(0, STAGE_NOTE_MID);
-                g.addColorStop(1, STAGE_NOTE_LOW);
-            } else {
-                g.addColorStop(0, 'rgba(168,85,247,0.6)');
-                g.addColorStop(1, 'rgba(109,40,217,0.5)');
-            }
-            ctx2d.fillStyle = g;
-            _vizRoundRect(ctx2d, x, y, w, barH, radius);
-            ctx2d.shadowBlur = 0;
-
-            // Accuracy tint over the sung portion (left of the playhead),
-            // between the slab and the gloss so it reads lit, not flat —
-            // and opaque, so the violet can't muddy red/amber to purple.
-            if (score && (isPast || isActive)) {
-                const entry = score.resultFor(i);
-                const tintRight = Math.max(x, Math.min(x + w, playheadX));
-                if (entry && entry.samplesIn > 0 && tintRight > x) {
-                    const [cr, cg, cb] = _vizAccuracyRgb(entry.accuracy);
-                    const lift = (v) => Math.round(v + (255 - v) * 0.5);
-                    const ag = ctx2d.createLinearGradient(0, y, 0, y + barH);
-                    ag.addColorStop(0, `rgb(${lift(cr)}, ${lift(cg)}, ${lift(cb)})`);
-                    ag.addColorStop(1, `rgb(${Math.round(cr * 0.8)}, ${Math.round(cg * 0.8)}, ${Math.round(cb * 0.8)})`);
-                    ctx2d.fillStyle = ag;
-                    _vizRoundRect(ctx2d, x, y, tintRight - x, barH, radius);
-                }
-            }
-
-            ctx2d.fillStyle = isActive ? 'rgba(255,255,255,0.85)' : 'rgba(235,230,255,0.30)';
-            _vizRoundRect(ctx2d, x + 2 * u, y + 1.5 * u,
-                Math.max(1, w - 4 * u), 2.5 * u, 1.5 * u);
-        }
-
-        if (score && score.trace.length) {
-            const yForF = (m) => noteTop + ((dHi - _vizDiaPosF(m)) / dSpan) * (usable - barH) + barH / 2;
-            _vizDrawTrace(ctx2d, score.trace, now, xFor, yForF, railW, playheadX, noteTop, noteBottom, u);
-        }
-
-        ctx2d.strokeStyle = STAGE_PLAYHEAD;
-        ctx2d.lineWidth = Math.max(1.5, 2 * u);
-        ctx2d.beginPath();
-        ctx2d.moveTo(playheadX, noteTop - 6 * u);
-        ctx2d.lineTo(playheadX, seamY);
-        ctx2d.stroke();
-
-        _vizDrawLyricBand(ctx2d, tokens, view.lines, now, railW, W, H, seamY, u, view.cue);
-        if (score) _vizDrawSummaryCard(ctx2d, W, H, railW, seamY, u, score);
+        _vizDrawStageBackdrop(ctx2d, W, view, layout, score);
+        _vizDrawStageLanes(ctx2d, W, view.range, layout);
+        _vizDrawStageRail(ctx2d, view.range, layout, score);
+        _vizDrawSeam(ctx2d, W, layout.seamY, layout.u);
+        _vizDrawGuideVoices(ctx2d, view.voices, view.scoredIdx, layout);
+        _vizDrawScoredSlabs(ctx2d, view.tokens, now, layout, score);
+        _vizDrawStageTrace(ctx2d, score, now, layout);
+        _vizDrawStagePlayhead(ctx2d, layout);
+        _vizDrawLyricBand(ctx2d, view.tokens, view.lines, now,
+            layout.railW, W, H, layout.seamY, layout.u, view.cue);
+        if (score) _vizDrawSummaryCard(ctx2d, W, H, layout.railW, layout.seamY, layout.u, score);
 
         ctx2d.restore();
     }
@@ -3984,6 +4049,48 @@
             });
         }
 
+        function syncSong(bundle) {
+            // Song/arrangement switch: notice it here (core hands the live
+            // songInfo every frame) and kick a non-blocking load.
+            const key = _vizSongKey(bundle.songInfo);
+            if (!key || key === loadedKey) return;
+            if (loadedKey !== null) clearData();
+            load(bundle.songInfo);
+        }
+
+        function syncClock(now) {
+            if (now === clockT) return;
+            clockT = now;
+            clockWallAt = _wallNow();
+        }
+
+        function scoringView(live, now) {
+            // Scoring layers only while this panel is (or was) scoring — a
+            // panel that never sang stays clean.
+            if (!live && !scorer.hasResults()) return null;
+            return {
+                live,
+                finished: songEnd > 0 && now >= songEnd,
+                stats: scorer.stats(),
+                resultFor: scorer.resultFor,
+                trace: scorer.trace(),
+            };
+        }
+
+        function drawStageFrame(W, H, now) {
+            const live = _lkMic.isOwnedBy(micOwner);
+            _vizDrawStage(ctx2d, W, H, {
+                range: stageRange,
+                voices,
+                scoredIdx,
+                tokens,
+                lines,
+                maxDuration,
+                cue,
+                leftRailMode: settings.leftRailMode,
+                score: scoringView(live, now),
+            }, now);
+        }
         return {
             // Read by core BEFORE init() so it can swap the underlying
             // <canvas> when the previous renderer held a different type.
@@ -4055,47 +4162,17 @@
 
             draw(bundle) {
                 if (destroyed || !ctx2d || !bundle) return;
-                // Song/arrangement switch: notice it here (core hands the
-                // live songInfo every frame) and kick a non-blocking load.
-                const key = _vizSongKey(bundle.songInfo);
-                if (key && key !== loadedKey) {
-                    if (loadedKey !== null) clearData();
-                    load(bundle.songInfo);
-                }
+                syncSong(bundle);
                 const now = (typeof bundle.currentTime === 'number') ? bundle.currentTime : 0;
-                if (now !== clockT) {
-                    clockT = now;
-                    clockWallAt = _wallNow();
-                }
+                syncClock(now);
                 if (_lkMic.isOwnedBy(micOwner)) _vizUpdateMicStatus(scorer);
+
                 const W = ctx2d.canvas ? ctx2d.canvas.width : 0;
                 const H = ctx2d.canvas ? ctx2d.canvas.height : 0;
                 if (!W || !H) return;
-                // The stage is the only offered look; a lyrics-only song has
-                // no pitch axis to place notes on, so it falls back to the
-                // flat ribbon silently — not a user-facing mode toggle.
-                // Mirrors the reference's `this._range` check.
+
                 if (stageRange) {
-                    const live = _lkMic.isOwnedBy(micOwner);
-                    _vizDrawStage(ctx2d, W, H, {
-                        range: stageRange,
-                        voices,
-                        scoredIdx,
-                        tokens,
-                        lines,
-                        maxDuration,
-                        cue,
-                        leftRailMode: settings.leftRailMode,
-                        // Scoring layers only while this panel is (or was)
-                        // scoring — a panel that never sang stays clean.
-                        score: (live || scorer.hasResults()) ? {
-                            live,
-                            finished: songEnd > 0 && now >= songEnd,
-                            stats: scorer.stats(),
-                            resultFor: scorer.resultFor,
-                            trace: scorer.trace(),
-                        } : null,
-                    }, now);
+                    drawStageFrame(W, H, now);
                     return;
                 }
                 // _vizDrawFrame's `range` param is null here by construction —
