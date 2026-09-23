@@ -860,7 +860,7 @@
     /** Tolerance is inclusive; the epsilon keeps a sung pitch exactly on the
      *  boundary from failing on float noise (e.g. 60.5 - 60 vs 0.5). */
     function _lkPitchMatches(sung, target, tolerance, octaveIndependent) {
-        return _lkPitchDistance(sung, target, octaveIndependent) <= tolerance + 1e-9;
+        return _lkPitchDistance(sung, target, octaveIndependent) <= tolerance + 0.000000001;
     }
 
     /** Song time a captured buffer represents. The ring spans the most
@@ -1096,7 +1096,7 @@
                 if (lastT > -Infinity) {
                     const delta = t - lastT;
                     if (delta < -_LK_SEEK_BACK_S) reset();
-                    else if (delta < 1e-3) return false;   // paused / micro-backstep
+                    else if (delta < 0.001) return false;   // paused / micro-backstep
                     else if (delta > _LK_SEEK_FORWARD_S) {
                         // Skip forward: leave the jumped-over syllables unjudged.
                         activeSince = t;
