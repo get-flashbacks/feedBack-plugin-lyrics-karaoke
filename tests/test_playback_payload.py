@@ -333,6 +333,21 @@ def test_playback_route_422_on_corrupt_side_file(tmp_path, monkeypatch):
     assert response.status_code == 422
 
 
+def test_playback_route_422_on_duplicate_vocal_track_id(tmp_path, monkeypatch):
+    _write_lyrics_only_tracks(tmp_path, ("a", "b"))
+    manifest = {"vocal_tracks": [
+        {"id": "same", "lyrics": "a.json"},
+        {"id": "same", "lyrics": "b.json"},
+    ]}
+    endpoint = _playback_endpoint(tmp_path)
+    monkeypatch.setattr(routes, "_resolve_sloppak", lambda filename: (tmp_path, manifest, tmp_path, False))
+
+    response = endpoint(filename="duet.sloppak")
+
+    assert response.status_code == 422
+    assert "Duplicate vocal track id" in response.body.decode("utf-8")
+
+
 def test_playback_route_200_with_payload(tmp_path, monkeypatch):
     (tmp_path / "lyrics.json").write_text(json.dumps([{"t": 0.0, "d": 0.5, "w": "hi"}]), encoding="utf-8")
     manifest = {"lyrics": "lyrics.json"}
