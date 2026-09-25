@@ -4,6 +4,22 @@ Lyrics Karaoke prepares synced lyrics and vocal pitch for a song, then shows
 them in FeedBack's vocals highway during playback. The plugin id remains
 `lyrics_karaoke`; existing prepared songs do not need regeneration.
 
+## Why choose the get-flashbacks edition?
+
+Choose this edition if you want singing to use FeedBack's main visualization
+picker. On a supported host, **Auto** selects a pitch highway for a Vocals
+arrangement, with timed syllables, note slabs, and guide bars for duets. You
+can score a chosen voice with an explicitly started microphone, and use the
+renderer in splitscreen alongside an instrument or another vocals panel.
+The preparation tools and legacy overlay remain available, so existing
+prepared packs do not need to be rebuilt.
+
+The [official got-feedBack plugin](https://github.com/got-feedBack/feedBack-plugin-lyrics-karaoke)
+already prepares lyrics and pitch and offers an overlay with microphone
+feedback. As of 2026-09-25, its `main` branch is version 1.4.1; this edition
+adds the host-managed visualization and multi-voice playback contract. It is
+a community-maintained fork, not an official got-feedBack release.
+
 ## Install and requirements
 
 Install this plugin in FeedBack's plugin directory and enable it in the host.
