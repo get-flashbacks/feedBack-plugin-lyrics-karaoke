@@ -2922,13 +2922,33 @@
             : null;
     }
 
+    /** The host's song_info payload provides the pack name in audio_url,
+     *  not filename. Prefer the panel's own URL over the page-global song
+     *  so panels with playable audio resolve their own lyrics. Adapted from the
+     *  filename resolution proposed in #31 (2026-09-25). */
+    function _vizResolveFilename(songInfo) {
+        const audioUrl = songInfo && songInfo.audio_url;
+        const match = typeof audioUrl === 'string'
+            ? /(?:^|\/)api\/sloppak\/([^/]+)\/file\//.exec(audioUrl)
+            : null;
+        if (match) {
+            try { return decodeURIComponent(match[1]); } catch (_) { /* try other identifiers */ }
+        }
+        if (songInfo && typeof songInfo.filename === 'string' && songInfo.filename) {
+            return songInfo.filename;
+        }
+        const current = window.feedBack && window.feedBack.currentSong;
+        return current && typeof current.filename === 'string' ? current.filename : null;
+    }
+
     /** Identity of the (song, arrangement) pair a payload was loaded for.
      *  Used to notice a song switch or an in-place arrangement change
      *  without re-fetching on every frame. */
     function _vizSongKey(songInfo) {
-        if (!songInfo || !songInfo.filename) return null;
+        const filename = _vizResolveFilename(songInfo);
+        if (!filename) return null;
         const idx = _vizArrangementIndex(songInfo);
-        return `${songInfo.filename}#${idx === null ? '' : idx}`;
+        return `${filename}#${idx === null ? '' : idx}`;
     }
 
     /** Every voice in a `/playback` payload, normalized, dropping any that
@@ -3992,7 +4012,7 @@
             abortInflight();
             const seq = ++loadSeq;
             requestedKey = key;
-            const filename = songInfo.filename;
+            const filename = _vizResolveFilename(songInfo);
             const arrIndex = _vizArrangementIndex(songInfo);
             let url = `/api/plugins/${VIZ_PLUGIN_ID}/playback?filename=${encodeURIComponent(filename)}`;
             if (arrIndex !== null) url += `&arrangement=${arrIndex}`;
@@ -4349,6 +4369,7 @@
             _registerVizProvider,
             _vizMatchesArrangement,
             _vizSongKey,
+            _vizResolveFilename,
             _vizNormalizeVoices,
             _vizScoredIndex,
             _vizSelectedVoiceIndex,

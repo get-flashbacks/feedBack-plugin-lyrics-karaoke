@@ -248,6 +248,39 @@ test('create loads the canonical payload and emits renderer-ready', async () => 
     r.destroy();
 });
 
+test('resolves the host song_info audio URL without a filename', async () => {
+    bus.reset();
+    const urls = [];
+    fetchImpl = (url) => {
+        urls.push(url);
+        return jsonFetch(okPayload([{ start: 1, duration: 0.5, text: 'hi', midi: 60 }]))();
+    };
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle({ songInfo: {
+        audio_url: '/api/sloppak/My%20Song.feedpak/file/stems/full.wav',
+        arrangement_index: 0, arrangement: 'Vocals',
+    } }));
+    await flush();
+    assert.match(urls[0], /playback\?filename=My%20Song\.feedpak&arrangement=0$/);
+    assert.strictEqual(bus.of('lyrics_karaoke:renderer-ready').length, 1);
+    r.destroy();
+});
+
+test('each panel resolves its own filename ahead of the global song', () => {
+    const previous = window.feedBack.currentSong;
+    window.feedBack.currentSong = { filename: 'global.feedpak' };
+    try {
+        assert.strictEqual(screen._vizResolveFilename({
+            audio_url: '/api/sloppak/panel.feedpak/file/stems/full.wav',
+            arrangement_index: 1,
+        }), 'panel.feedpak');
+        assert.strictEqual(screen._vizResolveFilename({ filename: 'explicit.feedpak' }), 'explicit.feedpak');
+        assert.strictEqual(screen._vizResolveFilename({}), 'global.feedpak');
+    } finally {
+        window.feedBack.currentSong = previous;
+    }
+});
+
 test('repeated init on one instance does not stack state or refetch per frame', async () => {
     bus.reset();
     let calls = 0;
