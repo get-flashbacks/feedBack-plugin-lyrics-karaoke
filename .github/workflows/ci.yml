@@ -8,3 +8,33 @@ on:
 jobs:
   ci:
     uses: got-feedback/.github/.github/workflows/reusable-ci.yml@main
+
+  vocals-release-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install route-test dependencies
+        run: python -m pip install pytest fastapi pyyaml ruff
+      - name: Python syntax and lint
+        run: |
+          python -m compileall -q routes.py tests
+          ruff check --select E4,E7,E9,F tests/fixtures/generate_feedpaks.py tests/test_generated_feedpaks.py
+      - name: JavaScript syntax
+        run: |
+          node --check screen.js
+          node --check tests/screen.test.js
+          node --check tests/vocal-engine.test.js
+      - name: Python route and payload tests
+        run: python -m pytest -q tests
+      - name: Renderer, scoring, and lifecycle tests
+        run: node --test tests/screen.test.js tests/vocal-engine.test.js
+      - name: Generate distributable synthetic packs
+        run: python tests/fixtures/generate_feedpaks.py "$RUNNER_TEMP/vocals-fixtures"
