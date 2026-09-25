@@ -84,7 +84,7 @@ four packs with synthetic tone audio for route and host smoke tests; the
 generator needs `pyyaml`. CI also uploads them as a `vocals-synthetic-packs`
 artifact for manual testing.
 
-The visualization adapts work from
+This plugin is distributed under [AGPL-3.0](LICENSE). The visualization adapts work from
 [Karaoke Highway](https://github.com/Taynavv/feedback-vocals-viz), licensed
 AGPL-3.0. The adapted sections in `screen.js` and `routes.py` retain source
 comments; the [integration architecture](docs/architecture/vocals-visualization-integration.md)
