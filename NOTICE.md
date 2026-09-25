@@ -17,6 +17,8 @@ this plugin on these dates:
   to this plugin's canonical vocal streams.
 - 2026-09-23: adapted scoring and microphone interaction behavior in
   `screen.js` to this plugin's playback and microphone interfaces.
+- 2026-09-25: corrected the integrated renderer's host song lookup so the
+  adapted stage receives playback data for each panel.
 
 The corresponding source files retain comments identifying the adapted
 sections and their origin. The complete source for this version is available
