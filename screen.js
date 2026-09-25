@@ -2922,13 +2922,35 @@
             : null;
     }
 
+    /** `songInfo.filename` is null/undefined on the wire (ws_highway.py's
+     *  song_info message never sets it) — the WebSocket layer expects
+     *  consumers to derive the filename from `audio_url` instead
+     *  (`/api/sloppak/<filename>/file/...`, core-quoted). Parse that first
+     *  so this renderer resolves its OWN song per splitscreen panel (each
+     *  panel's bundle carries its own audio_url); fall back to the
+     *  page-global `window.feedBack.currentSong` for the rare case
+     *  audio_url itself is absent (e.g. a sloppak with no playable stems —
+     *  song_info still carries a title but no audio, per ws_highway.py's
+     *  audio_error path). Without this, every song silently fails to load
+     *  playback data — `_vizSongKey` returns null and `load()` never fires. */
+    function _vizResolveFilename(songInfo) {
+        const m = /^\/api\/sloppak\/([^?]+)\/file\//.exec(String((songInfo && songInfo.audio_url) || ''));
+        if (m) {
+            try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
+        }
+        if (songInfo && songInfo.filename) return songInfo.filename;
+        const cur = window.feedBack && window.feedBack.currentSong;
+        return (cur && typeof cur === 'string') ? cur : null;
+    }
+
     /** Identity of the (song, arrangement) pair a payload was loaded for.
      *  Used to notice a song switch or an in-place arrangement change
      *  without re-fetching on every frame. */
     function _vizSongKey(songInfo) {
-        if (!songInfo || !songInfo.filename) return null;
+        const filename = _vizResolveFilename(songInfo);
+        if (!filename) return null;
         const idx = _vizArrangementIndex(songInfo);
-        return `${songInfo.filename}#${idx === null ? '' : idx}`;
+        return `${filename}#${idx === null ? '' : idx}`;
     }
 
     /** Every voice in a `/playback` payload, normalized, dropping any that
@@ -3992,7 +4014,7 @@
             abortInflight();
             const seq = ++loadSeq;
             requestedKey = key;
-            const filename = songInfo.filename;
+            const filename = _vizResolveFilename(songInfo);
             const arrIndex = _vizArrangementIndex(songInfo);
             let url = `/api/plugins/${VIZ_PLUGIN_ID}/playback?filename=${encodeURIComponent(filename)}`;
             if (arrIndex !== null) url += `&arrangement=${arrIndex}`;
