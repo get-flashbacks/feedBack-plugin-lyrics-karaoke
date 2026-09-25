@@ -87,5 +87,6 @@ artifact for manual testing.
 This plugin is distributed under [AGPL-3.0](LICENSE). The visualization adapts work from
 [Karaoke Highway](https://github.com/Taynavv/feedback-vocals-viz), licensed
 AGPL-3.0. The adapted sections in `screen.js` and `routes.py` retain source
-comments; the [integration architecture](docs/architecture/vocals-visualization-integration.md)
+comments. [NOTICE.md](NOTICE.md) records the adaptation dates, and the
+[integration architecture](docs/architecture/vocals-visualization-integration.md)
 records the data and ownership decisions.
