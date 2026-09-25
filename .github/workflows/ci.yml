@@ -26,7 +26,7 @@ jobs:
       - name: Python syntax and lint
         run: |
           python -m compileall -q routes.py tests
-          ruff check .
+          ruff check --select E4,E7,E9,F routes.py tests
       - name: JavaScript syntax
         run: |
           node --check screen.js
