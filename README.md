@@ -75,10 +75,14 @@ back to a compatible Lyrics Karaoke release.
 
 ## Development and provenance
 
-Run `python -m pytest -q tests` and
+Install test dependencies with
+`python -m pip install pytest fastapi pyyaml httpx`, then run
+`python -m pytest -q tests` and
 `node --test tests/screen.test.js tests/vocal-engine.test.js` from this
 directory. `python tests/fixtures/generate_feedpaks.py OUTPUT_DIR` creates
-four packs with synthetic tone audio for route and host smoke tests.
+four packs with synthetic tone audio for route and host smoke tests; the
+generator needs `pyyaml`. CI also uploads them as a `vocals-synthetic-packs`
+artifact for manual testing.
 
 The visualization adapts work from
 [Karaoke Highway](https://github.com/Taynavv/feedback-vocals-viz), licensed

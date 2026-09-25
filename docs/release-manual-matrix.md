@@ -10,7 +10,9 @@ untested cell as a pass.
 ## Test media
 
 Generate the four copyright-free packs with
-`python tests/fixtures/generate_feedpaks.py OUTPUT_DIR`: `single-voice`,
+`python tests/fixtures/generate_feedpaks.py OUTPUT_DIR` (after installing
+`pyyaml`), or download the `vocals-synthetic-packs` artifact from the PR's
+CI run: `single-voice`,
 `duet`, `incomplete-pitch`, and `lyrics-only`. These contain prepared lyric
 and pitch sidecars plus a short synthesized tone; they contain no copyrighted
 media. The synthetic tone can verify basic capture and timing. Also test one

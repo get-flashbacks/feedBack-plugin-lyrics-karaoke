@@ -93,14 +93,14 @@ def generate(output_dir: Path):
     paths = {}
     for name, (fields, sidecars) in fixture_specs().items():
         manifest = {
-            "format_version": 1,
+            "feedpak_version": "1.0.0",
             "title": f"Synthetic {name}",
             "artist": "Lyrics Karaoke test fixture",
             "duration": 3.0,
             "arrangements": [{"id": "vocals", "name": "Vocals",
                               "file": "arrangements/vocals.json"}],
-            "stems": [{"id": "full", "file": "stems/full.wav", "default": True},
-                      {"id": "vocals", "file": "stems/vocals.wav"}],
+            "stems": [{"id": "full", "file": "stems/full.wav", "default": False},
+                      {"id": "vocals", "file": "stems/vocals.wav", "default": True}],
             **fields,
         }
         path = output_dir / f"{name}.sloppak"
