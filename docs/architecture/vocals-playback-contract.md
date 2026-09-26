@@ -91,7 +91,13 @@ The visualization provider:
 2. does not re-parse `lyrics.json` or `vocal_pitch.json`;
 3. keeps all renderer state local to its instance;
 4. treats 404 as an expected unprepared-song state;
-5. surfaces 422 and network failures through `renderer-failed`; and
-6. never retries a failed load every frame.
+5. surfaces 422 and network failures through `renderer-failed`;
+6. never retries a failed load every frame; and
+7. surfaces a `song_info` it cannot resolve to a pack filename (no
+   `audio_url` pack segment, no `filename`, no core `currentSong`
+   fallback — e.g. loose-folder/archive audio, or a stem-less sloppak)
+   through `renderer-failed` with `reason: 'unresolvable-filename'`,
+   once per unresolvable streak, and clears any previously loaded
+   song's data rather than leaving it on screen.
 
 Fixtures and route tests live in `tests/test_playback_payload.py`.

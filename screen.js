@@ -3920,6 +3920,12 @@
         // retried when the renderer is re-init'd (song switch, panel
         // re-mount, re-selecting the viz), not by spinning.
         let failedKey = null;
+        // An unresolvable songInfo (no audio_url pack segment, no filename,
+        // no core currentSong fallback) has no key at all, so it can't use
+        // failedKey's per-key gate. One renderer-failed per unresolvable
+        // streak, same "don't spin" reasoning as failedKey; cleared the
+        // moment a resolvable song arrives.
+        let unresolvedNotified = false;
         let loadSeq = 0;           // monotonic; stale responses drop themselves
         let abortCtl = null;
         // Scoring keys start from the engine preferences (which carry any
@@ -3998,6 +4004,7 @@
         function resetLoadState() {
             clearData();
             failedKey = null;
+            unresolvedNotified = false;
         }
 
         /** Fire-and-forget load. Deliberately NOT awaited by `draw` — a
@@ -4082,8 +4089,16 @@
                     abortInflight();
                     clearData();
                 }
+                if (!unresolvedNotified) {
+                    unresolvedNotified = true;
+                    _vizEmit('lyrics_karaoke:renderer-failed', {
+                        reason: 'unresolvable-filename',
+                        message: 'No pack filename could be resolved from song_info',
+                    });
+                }
                 return;
             }
+            unresolvedNotified = false;
             if (key === loadedKey) return;
             if (loadedKey !== null) clearData();
             load(bundle.songInfo);

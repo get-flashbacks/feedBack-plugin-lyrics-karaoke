@@ -304,9 +304,18 @@ test('an unresolvable song keys null and never fetches from a cold panel', async
     r.draw(bundle({ songInfo: unresolvable }));
     await flush();
 
-    // Whether this should also emit renderer-failed is not decided yet, so
-    // it's deliberately not asserted either way.
     assert.deepStrictEqual(urls, []);
+    const failed = bus.of('lyrics_karaoke:renderer-failed');
+    assert.strictEqual(failed.length, 1);
+    assert.strictEqual(failed[0].detail.reason, 'unresolvable-filename');
+
+    // Repeated draws with the same unresolvable songInfo must not re-fire —
+    // this is a "don't spin" gate, same reasoning as failedKey for a real 404.
+    r.draw(bundle({ songInfo: unresolvable }));
+    r.draw(bundle({ songInfo: unresolvable }));
+    await flush();
+    assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1);
+
     r.destroy();
 });
 
@@ -332,6 +341,7 @@ test('switching from a loaded song to an unresolvable one clears the old lyrics'
 
         assert.ok(!drew(), "the previous song's lyrics must not keep drawing");
         assert.strictEqual(urls.length, 1, 'no fetch for the unresolvable song');
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1);
     } finally {
         // Always release playback ownership, so a failure here can't cascade
         // into the ownership tests that run later.
