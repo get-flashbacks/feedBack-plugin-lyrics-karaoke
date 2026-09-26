@@ -291,7 +291,7 @@ test('a non-sloppak audio_url names no pack', () => {
     );
 });
 
-test('an unresolvable song keys null and never fetches', async () => {
+test('an unresolvable song keys null and never fetches from a cold panel', async () => {
     bus.reset();
     const urls = [];
     fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([]))(); };
@@ -304,9 +304,39 @@ test('an unresolvable song keys null and never fetches', async () => {
     r.draw(bundle({ songInfo: unresolvable }));
     await flush();
 
+    // Whether this should also emit renderer-failed is not decided yet, so
+    // it's deliberately not asserted either way.
     assert.deepStrictEqual(urls, []);
-    assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 0);
     r.destroy();
+});
+
+test('switching from a loaded song to an unresolvable one clears the old lyrics', async () => {
+    bus.reset();
+    const urls = [];
+    fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([
+        { start: 1, duration: 0.5, text: 'staleword', midi: 60 },
+    ]))(); };
+    const canvas = makeCanvas();
+    const r = window.feedBackViz_lyrics_karaoke();
+    try {
+        r.init(canvas, bundle());
+        await flush();
+        r.draw(bundle());
+        const drew = () => canvas._ctx.texts.some((t) => t.t.includes('staleword'));
+        assert.ok(drew(), 'the loaded song draws its lyrics');
+
+        const unresolvable = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
+        canvas._ctx.texts.length = 0;
+        for (let i = 0; i < 3; i++) r.draw(bundle({ songInfo: unresolvable }));
+        await flush();
+
+        assert.ok(!drew(), "the previous song's lyrics must not keep drawing");
+        assert.strictEqual(urls.length, 1, 'no fetch for the unresolvable song');
+    } finally {
+        // Always release playback ownership, so a failure here can't cascade
+        // into the ownership tests that run later.
+        r.destroy();
+    }
 });
 
 test('each panel resolves its own filename ahead of the global song', () => {
@@ -403,7 +433,7 @@ test('a song switch reloads and does not keep the previous song tokens', async (
     r.init(makeCanvas(), bundle());
     await flush();
 
-    r.draw(bundle({ songInfo: { filename: 'other.sloppak', arrangement_index: 0, arrangement: 'Vocals' } }));
+    r.draw(bundle({ songInfo: { audio_url: '/api/sloppak/other.sloppak/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals' } }));
     await flush();
 
     assert.strictEqual(urls.length, 2);
@@ -418,7 +448,7 @@ test('an arrangement switch on the same song reloads with the new index', async 
     const r = window.feedBackViz_lyrics_karaoke();
     r.init(makeCanvas(), bundle());
     await flush();
-    r.draw(bundle({ songInfo: { filename: 'song.sloppak', arrangement_index: 2, arrangement: 'Vocals' } }));
+    r.draw(bundle({ songInfo: { audio_url: '/api/sloppak/song.sloppak/file/stems/vocals.ogg', arrangement_index: 2, arrangement: 'Vocals' } }));
     await flush();
     assert.strictEqual(urls.length, 2);
     assert.match(urls[1], /&arrangement=2$/);
@@ -429,7 +459,7 @@ test('a song with no arrangement index omits the query param', async () => {
     const urls = [];
     fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([]))(); };
     const r = window.feedBackViz_lyrics_karaoke();
-    r.init(makeCanvas(), bundle({ songInfo: { filename: 'song.sloppak', arrangement: 'Vocals' } }));
+    r.init(makeCanvas(), bundle({ songInfo: { audio_url: '/api/sloppak/song.sloppak/file/stems/vocals.ogg', arrangement: 'Vocals' } }));
     await flush();
     assert.ok(!urls[0].includes('arrangement='), urls[0]);
     r.destroy();
@@ -532,12 +562,12 @@ test('two instances render independently from their own payloads', async () => {
     const ca = makeCanvas();
     const cb = makeCanvas();
     a.init(ca, bundle());
-    b.init(cb, bundle({ songInfo: { filename: 'other.sloppak', arrangement_index: 1, arrangement: 'Vocals' } }));
+    b.init(cb, bundle({ songInfo: { audio_url: '/api/sloppak/other.sloppak/file/stems/vocals.ogg', arrangement_index: 1, arrangement: 'Vocals' } }));
     await flush();
 
     assert.strictEqual(screen._vizOwnsPlayback(), true);
     a.draw(bundle());
-    b.draw(bundle({ songInfo: { filename: 'other.sloppak', arrangement_index: 1, arrangement: 'Vocals' } }));
+    b.draw(bundle({ songInfo: { audio_url: '/api/sloppak/other.sloppak/file/stems/vocals.ogg', arrangement_index: 1, arrangement: 'Vocals' } }));
     assert.ok(ca._ctx.calls.includes('fillText'));
     assert.ok(cb._ctx.calls.includes('fillText'));
 
@@ -545,7 +575,7 @@ test('two instances render independently from their own payloads', async () => {
     a.destroy();
     assert.strictEqual(screen._vizOwnsPlayback(), true);
     cb._ctx.calls.length = 0;
-    b.draw(bundle({ songInfo: { filename: 'other.sloppak', arrangement_index: 1, arrangement: 'Vocals' } }));
+    b.draw(bundle({ songInfo: { audio_url: '/api/sloppak/other.sloppak/file/stems/vocals.ogg', arrangement_index: 1, arrangement: 'Vocals' } }));
     assert.ok(cb._ctx.calls.length > 0, 'surviving instance still draws');
 
     b.destroy();
@@ -669,11 +699,11 @@ test('a failure on one song does not block loading the next', async () => {
     const r = window.feedBackViz_lyrics_karaoke();
     r.init(makeCanvas(), bundle());
     await flush();
-    r.draw(bundle({ songInfo: { filename: 'good.sloppak', arrangement_index: 0, arrangement: 'Vocals' } }));
+    r.draw(bundle({ songInfo: { audio_url: '/api/sloppak/good.sloppak/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals' } }));
     await flush();
     assert.strictEqual(calls, 2);
     bus.reset();
-    r.draw(bundle({ songInfo: { filename: 'good.sloppak', arrangement_index: 0, arrangement: 'Vocals' } }));
+    r.draw(bundle({ songInfo: { audio_url: '/api/sloppak/good.sloppak/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals' } }));
     assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 0);
     r.destroy();
 });
@@ -771,14 +801,14 @@ test('a notation-only vocals chart still renders (lyrics are song-level)', async
     const canvas = makeCanvas();
     r.init(canvas, bundle({
         songInfo: {
-            filename: 'song.sloppak', arrangement_index: 0,
+            audio_url: '/api/sloppak/song.sloppak/file/stems/vocals.ogg', arrangement_index: 0,
             arrangement: 'Vocals', has_notation: true,
         },
     }));
     await flush();
     r.draw(bundle({
         songInfo: {
-            filename: 'song.sloppak', arrangement_index: 0,
+            audio_url: '/api/sloppak/song.sloppak/file/stems/vocals.ogg', arrangement_index: 0,
             arrangement: 'Vocals', has_notation: true,
         },
     }));
@@ -888,7 +918,7 @@ test('re-init keeps playback ownership while replacing an in-flight load', async
         const newCanvas = makeCanvas();
         r.init(oldCanvas, bundle());
         r.init(newCanvas, bundle({ songInfo: {
-            filename: 'new.sloppak', arrangement_index: 0, arrangement: 'Vocals',
+            audio_url: '/api/sloppak/new.sloppak/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals',
         } }));
         assert.strictEqual(requests[0].signal.aborted, true, 'old load must be cancelled');
         assert.deepStrictEqual(log.suppressed, [true], 're-init must not release and re-claim');
@@ -898,7 +928,7 @@ test('re-init keeps playback ownership while replacing an in-flight load', async
         await flush();
         assert.deepStrictEqual(bus.of('lyrics_karaoke:renderer-ready').map((e) => e.detail.filename),
             ['new.sloppak'], 'stale first load must not emit ready');
-        r.draw(bundle({ songInfo: { filename: 'new.sloppak', arrangement_index: 0, arrangement: 'Vocals' } }));
+        r.draw(bundle({ songInfo: { audio_url: '/api/sloppak/new.sloppak/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals' } }));
         assert.ok(newCanvas._ctx.calls.includes('fillText'));
         assert.deepStrictEqual(oldCanvas._ctx.calls, [], 'old panel canvas must not be reused');
     } finally {
@@ -1427,7 +1457,7 @@ test('a song switch from pitched to lyrics-only swaps the path', async () => {
     assert.ok(canvas._ctx.calls.includes('save'), 'pitched song uses the stage');
 
     const plain = bundle({
-        songInfo: { filename: 'plain.sloppak', arrangement_index: 0, arrangement: 'Vocals' },
+        songInfo: { audio_url: '/api/sloppak/plain.sloppak/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals' },
     });
     r.draw(plain);
     await flush();

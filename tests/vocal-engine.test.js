@@ -696,7 +696,7 @@ const zeroCanvas = () => ({
 });
 
 function songInfo(name) {
-    return { filename: name || 'song.sloppak', arrangement_index: 0, arrangement: 'Vocals' };
+    return { audio_url: '/api/sloppak/' + encodeURIComponent(name || 'song.sloppak') + '/file/stems/vocals.ogg', arrangement_index: 0, arrangement: 'Vocals' };
 }
 
 async function mountPanel(tokens, name) {

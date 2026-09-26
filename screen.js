@@ -4073,7 +4073,18 @@
             // Song/arrangement switch: notice it here (core hands the live
             // songInfo every frame) and kick a non-blocking load.
             const key = _vizSongKey(bundle.songInfo);
-            if (!key || key === loadedKey) return;
+            if (!key) {
+                // The host switched to a source that names no pack (loose
+                // folder / archive audio, or a stem-less sloppak). Drop the
+                // previous song's data and any in-flight load once, so its
+                // lyrics don't keep drawing over the new song.
+                if (loadedKey !== null || requestedKey !== null) {
+                    abortInflight();
+                    clearData();
+                }
+                return;
+            }
+            if (key === loadedKey) return;
             if (loadedKey !== null) clearData();
             load(bundle.songInfo);
         }
