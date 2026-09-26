@@ -307,23 +307,50 @@ test('an unresolvable song keys null and never fetches from a cold panel', async
     assert.strictEqual(screen._vizSongKey(unresolvable), null);
 
     const r = window.feedBackViz_lyrics_karaoke();
-    r.init(makeCanvas(), bundle({ songInfo: unresolvable }));
-    r.draw(bundle({ songInfo: unresolvable }));
-    await flush();
+    try {
+        r.init(makeCanvas(), bundle({ songInfo: unresolvable }));
+        r.draw(bundle({ songInfo: unresolvable }));
+        await flush();
 
-    assert.deepStrictEqual(urls, []);
-    const failed = bus.of('lyrics_karaoke:renderer-failed');
-    assert.strictEqual(failed.length, 1);
-    assert.strictEqual(failed[0].detail.reason, 'unresolvable-filename');
+        assert.deepStrictEqual(urls, []);
+        const failed = bus.of('lyrics_karaoke:renderer-failed');
+        assert.strictEqual(failed.length, 1);
+        assert.strictEqual(failed[0].detail.reason, 'unresolvable-filename');
+        // Matches the documented renderer-failed shape (docs/architecture/
+        // vocals-visualization-integration.md): {reason, filename,
+        // arrangementIndex, status?, message?} — a consumer written to that
+        // shape must not read undefined for a reason it's never seen before.
+        assert.strictEqual(failed[0].detail.filename, null);
+        assert.strictEqual(failed[0].detail.arrangementIndex, null);
+        assert.strictEqual(typeof failed[0].detail.message, 'string');
 
-    // Repeated draws with the same unresolvable songInfo must not re-fire —
-    // this is a "don't spin" gate, same reasoning as failedKey for a real 404.
-    r.draw(bundle({ songInfo: unresolvable }));
-    r.draw(bundle({ songInfo: unresolvable }));
-    await flush();
-    assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1);
+        // Repeated draws with the same unresolvable songInfo must not re-fire —
+        // this is a "don't spin" gate, same reasoning as failedKey for a real 404.
+        r.draw(bundle({ songInfo: unresolvable }));
+        r.draw(bundle({ songInfo: unresolvable }));
+        await flush();
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1);
 
-    r.destroy();
+        // But a NEW unresolvable streak (a resolvable song loaded and cleared
+        // the gate in between) must re-fire — otherwise a user's second
+        // unresolvable song of the session goes silent for the rest of it,
+        // the exact failure this signal exists to prevent.
+        fetchImpl = () => jsonFetch(okPayload([
+            { start: 1, duration: 0.5, text: 'hi', midi: 60 },
+        ]))();
+        const resolvable = { audio_url: '/api/sloppak/song.sloppak/file/stems/full.wav' };
+        r.draw(bundle({ songInfo: resolvable }));
+        await flush();
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1,
+            'a resolvable song must not itself emit renderer-failed');
+
+        r.draw(bundle({ songInfo: unresolvable }));
+        await flush();
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 2,
+            'a second, later unresolvable streak must re-fire, not stay silent');
+    } finally {
+        r.destroy();
+    }
 });
 
 test('the currentSong fallback keeps a warm panel resolving once anything has loaded', async () => {

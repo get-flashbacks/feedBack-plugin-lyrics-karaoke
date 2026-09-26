@@ -4105,6 +4105,8 @@
                     unresolvedNotified = true;
                     _vizEmit('lyrics_karaoke:renderer-failed', {
                         reason: 'unresolvable-filename',
+                        filename: null,
+                        arrangementIndex: (bundle.songInfo && bundle.songInfo.arrangement_index) ?? null,
                         message: 'No pack filename could be resolved from song_info',
                     });
                 }
