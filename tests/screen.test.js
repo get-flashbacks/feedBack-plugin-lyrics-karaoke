@@ -158,7 +158,14 @@ function jsonFetch(body, status) {
 function bundle(over) {
     return Object.assign({
         currentTime: 1.0,
-        songInfo: { filename: 'song.sloppak', arrangement_index: 0, arrangement: 'Vocals' },
+        // Shaped like the `song_info` message ws_highway.py actually sends:
+        // `audio_url` and NO `filename`, so the default fixture exercises the
+        // branch that runs in production rather than one that can't occur.
+        songInfo: {
+            audio_url: '/api/sloppak/song.sloppak/file/stems/vocals.ogg',
+            arrangement_index: 0,
+            arrangement: 'Vocals',
+        },
     }, over || {});
 }
 
@@ -263,6 +270,42 @@ test('resolves the host song_info audio URL without a filename', async () => {
     await flush();
     assert.match(urls[0], /playback\?filename=My%20Song\.feedpak&arrangement=0$/);
     assert.strictEqual(bus.of('lyrics_karaoke:renderer-ready').length, 1);
+    r.destroy();
+});
+
+test('a /file/ inside the stem path does not end the pack name', () => {
+    // The pack segment is quoted with safe="" (never a raw '/'); the stem
+    // path keeps its slashes, so it can itself contain '/file/'.
+    assert.strictEqual(
+        screen._vizResolveFilename({ audio_url: '/api/sloppak/x.feedpak/file/stems/file/Lead.wav' }),
+        'x.feedpak',
+    );
+});
+
+test('a non-sloppak audio_url names no pack', () => {
+    // Loose-folder / archive sources serve a cache artifact that is not the
+    // pack name, so it must not resolve to one.
+    assert.strictEqual(
+        screen._vizResolveFilename({ audio_url: '/audio/audio_Song_abc123.mp3' }),
+        null,
+    );
+});
+
+test('an unresolvable song keys null and never fetches', async () => {
+    bus.reset();
+    const urls = [];
+    fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([]))(); };
+    const unresolvable = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
+
+    assert.strictEqual(screen._vizSongKey(unresolvable), null);
+
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle({ songInfo: unresolvable }));
+    r.draw(bundle({ songInfo: unresolvable }));
+    await flush();
+
+    assert.deepStrictEqual(urls, []);
+    assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 0);
     r.destroy();
 });
 
