@@ -2925,22 +2925,32 @@
     /** `songInfo.filename` is null/undefined on the wire (ws_highway.py's
      *  song_info message never sets it) — the WebSocket layer expects
      *  consumers to derive the filename from `audio_url` instead
-     *  (`/api/sloppak/<filename>/file/...`, core-quoted). Parse that first
-     *  so this renderer resolves its OWN song per splitscreen panel (each
-     *  panel's bundle carries its own audio_url); fall back to the
-     *  page-global `window.feedBack.currentSong` for the rare case
-     *  audio_url itself is absent (e.g. a sloppak with no playable stems —
-     *  song_info still carries a title but no audio, per ws_highway.py's
-     *  audio_error path). Without this, every song silently fails to load
-     *  playback data — `_vizSongKey` returns null and `load()` never fires. */
+     *  (`/api/sloppak/<filename>/file/...`, core-quoted). Parse that first,
+     *  because the page-global `window.feedBack.currentSong` below is a
+     *  broadcast value every highway instance overwrites, splitscreen panels
+     *  included: those panels show different ARRANGEMENTS of the same song,
+     *  so the pack name is never what distinguishes them. The global is the
+     *  fallback only for the rare case audio_url is itself absent (e.g. a
+     *  sloppak with no playable stems — song_info still carries a title but
+     *  no audio, per ws_highway.py's audio_error path, and such a pack can
+     *  still ship lyrics). Without any of this, every song silently fails to
+     *  load playback data — `_vizSongKey` returns null and `load()` never
+     *  fires. */
     function _vizResolveFilename(songInfo) {
-        const m = /^\/api\/sloppak\/([^?]+)\/file\//.exec(String((songInfo && songInfo.audio_url) || ''));
+        // `[^/]+`, not a class that stops at `?`: the filename segment is
+        // quoted with safe="" and so can never hold a raw '/', whereas the
+        // stem path that follows is quoted with '/' left intact — a looser
+        // class swallows a `/file/` occurring inside that path and names a
+        // pack that isn't there.
+        const m = /^\/api\/sloppak\/([^/]+)\/file\//.exec(String((songInfo && songInfo.audio_url) || ''));
         if (m) {
             try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
         }
         if (songInfo && songInfo.filename) return songInfo.filename;
+        // Core's song_info handler always assigns an OBJECT here, with
+        // `filename` already decoded; every core consumer reads that field.
         const cur = window.feedBack && window.feedBack.currentSong;
-        return (cur && typeof cur === 'string') ? cur : null;
+        return (cur && cur.filename) ? String(cur.filename) : null;
     }
 
     /** Identity of the (song, arrangement) pair a payload was loaded for.
@@ -4370,6 +4380,7 @@
             _createVizRenderer,
             _registerVizProvider,
             _vizMatchesArrangement,
+            _vizResolveFilename,
             _vizSongKey,
             _vizNormalizeVoices,
             _vizScoredIndex,

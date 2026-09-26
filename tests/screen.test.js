@@ -158,7 +158,15 @@ function jsonFetch(body, status) {
 function bundle(over) {
     return Object.assign({
         currentTime: 1.0,
-        songInfo: { filename: 'song.sloppak', arrangement_index: 0, arrangement: 'Vocals' },
+        // Shaped like the `song_info` message ws_highway.py actually sends —
+        // `audio_url` and NO `filename`. A fixture carrying a `filename`
+        // would pin a shape that cannot occur in production, leaving the
+        // branch that does run unpinned.
+        songInfo: {
+            audio_url: '/api/sloppak/song.sloppak/file/stems/vocals.ogg',
+            arrangement_index: 0,
+            arrangement: 'Vocals',
+        },
     }, over || {});
 }
 
@@ -224,6 +232,95 @@ test('pitch range is null for lyrics-only content', () => {
         { start: 1, duration: 1, text: 'b', midi: 62 },
     ]);
     assert.ok(r.hi - r.lo >= 7, 'never collapses flatter than a fifth');
+});
+
+// ── Filename resolution (the audio_url wire shape) ──────────────────────
+
+test('resolveFilename decodes the pack name out of a core-quoted audio_url', () => {
+    const resolve = screen._vizResolveFilename;
+    assert.strictEqual(
+        resolve({ audio_url: '/api/sloppak/My%20Song.feedpak/file/stems/vocals.ogg' }),
+        'My Song.feedpak',
+    );
+    // The stem path is quoted with '/' left intact, so a '/file/' inside it
+    // must not be mistaken for the segment boundary the pack name ends at.
+    assert.strictEqual(
+        resolve({ audio_url: '/api/sloppak/x.feedpak/file/stems/file/Lead.wav' }),
+        'x.feedpak',
+    );
+});
+
+test('a non-sloppak audio_url names no pack and so does not resolve', () => {
+    // Loose-folder/archive sources yield a cache artifact that does not name
+    // the pack, so it must not be mistaken for one.
+    assert.strictEqual(
+        screen._vizResolveFilename({ audio_url: '/audio/audio_Song_abc123.mp3' }),
+        null,
+    );
+});
+
+test('resolution order is audio_url, then songInfo.filename, then the core global', () => {
+    const resolve = screen._vizResolveFilename;
+    assert.strictEqual(
+        resolve({
+            filename: 'song.sloppak',
+            audio_url: '/api/sloppak/from-url.feedpak/file/stems/vocals.ogg',
+        }),
+        'from-url.feedpak',
+    );
+    assert.strictEqual(resolve({ filename: 'song.sloppak' }), 'song.sloppak');
+});
+
+test('falls back to the core currentSong object when audio_url is absent', () => {
+    // Core sets currentSong to an object, not a string — the audio_error
+    // path (a sloppak with lyrics but no playable stems) still loads.
+    window.feedBack.currentSong = { filename: 'My Song.feedpak', title: 'My Song' };
+    try {
+        assert.strictEqual(
+            screen._vizResolveFilename({ arrangement_index: 0, arrangement: 'Vocals' }),
+            'My Song.feedpak',
+        );
+    } finally {
+        delete window.feedBack.currentSong;
+    }
+});
+
+test('an unresolvable song keys null and never loads', async () => {
+    bus.reset();
+    const urls = [];
+    fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([]))(); };
+    const unresolvable = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
+
+    assert.strictEqual(screen._vizSongKey(unresolvable), null);
+
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle({ songInfo: unresolvable }));
+    r.draw(bundle({ songInfo: unresolvable }));
+    await flush();
+
+    assert.deepStrictEqual(urls, []);
+    assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 0);
+    r.destroy();
+});
+
+test('a live-shaped songInfo drives the playback filename query end to end', async () => {
+    bus.reset();
+    const urls = [];
+    fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([
+        { start: 1, duration: 0.5, text: 'a', midi: 60 },
+    ]))(); };
+
+    const r = window.feedBackViz_lyrics_karaoke();
+    r.init(makeCanvas(), bundle({ songInfo: {
+        audio_url: '/api/sloppak/My%20Song.feedpak/file/stems/vocals.ogg',
+        arrangement_index: 0,
+        arrangement: 'Vocals',
+    } }));
+    await flush();
+
+    assert.match(urls[0], /\/playback\?filename=My%20Song\.feedpak&arrangement=0$/);
+    assert.strictEqual(bus.of('lyrics_karaoke:renderer-ready').length, 1);
+    r.destroy();
 });
 
 // ── Lifecycle: create / repeated create / destroy ───────────────────────
