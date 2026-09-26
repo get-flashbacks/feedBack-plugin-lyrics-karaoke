@@ -3920,6 +3920,12 @@
         // retried when the renderer is re-init'd (song switch, panel
         // re-mount, re-selecting the viz), not by spinning.
         let failedKey = null;
+        // An unresolvable songInfo (no audio_url pack segment, no filename,
+        // no core currentSong fallback) has no key at all, so it can't use
+        // failedKey's per-key gate. One renderer-failed per unresolvable
+        // streak, same "don't spin" reasoning as failedKey; cleared the
+        // moment a resolvable song arrives.
+        let unresolvedNotified = false;
         let loadSeq = 0;           // monotonic; stale responses drop themselves
         let abortCtl = null;
         // Scoring keys start from the engine preferences (which carry any
@@ -3974,6 +3980,11 @@
                 abortCtl = null;
             }
             requestedKey = null;
+            // Bump the sequence token even when there's no AbortController
+            // (or the host's fetch doesn't honor `signal`) so a response
+            // that lands after this call still fails the `seq !== loadSeq`
+            // check in load()'s then/catch and can't resurrect stale data.
+            loadSeq++;
         }
 
         function clearData() {
@@ -3998,6 +4009,7 @@
         function resetLoadState() {
             clearData();
             failedKey = null;
+            unresolvedNotified = false;
         }
 
         /** Fire-and-forget load. Deliberately NOT awaited by `draw` — a
@@ -4073,7 +4085,35 @@
             // Song/arrangement switch: notice it here (core hands the live
             // songInfo every frame) and kick a non-blocking load.
             const key = _vizSongKey(bundle.songInfo);
-            if (!key || key === loadedKey) return;
+            if (!key) {
+                // _vizResolveFilename's last resort is window.feedBack.currentSong,
+                // a page-global every highway (main or any other panel) sets once
+                // it has loaded a song. Because splitscreen panels all show the
+                // SAME song (different arrangements), that fallback resolves for
+                // almost any source once ANYTHING on the page has loaded once. A
+                // null key is therefore narrow: this renderer's very first
+                // song_info, before any highway anywhere on the page has set
+                // currentSong yet, for a source whose audio_url names no pack
+                // (loose-folder/archive audio, or a stem-less sloppak). Drop any
+                // previous data and in-flight load once regardless, so a future
+                // change to that fallback can't leave stale lyrics on screen.
+                if (loadedKey !== null || requestedKey !== null) {
+                    abortInflight();
+                    clearData();
+                }
+                if (!unresolvedNotified) {
+                    unresolvedNotified = true;
+                    _vizEmit('lyrics_karaoke:renderer-failed', {
+                        reason: 'unresolvable-filename',
+                        filename: null,
+                        arrangementIndex: (bundle.songInfo && bundle.songInfo.arrangement_index) ?? null,
+                        message: 'No pack filename could be resolved from song_info',
+                    });
+                }
+                return;
+            }
+            unresolvedNotified = false;
+            if (key === loadedKey) return;
             if (loadedKey !== null) clearData();
             load(bundle.songInfo);
         }
