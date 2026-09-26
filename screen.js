@@ -3980,6 +3980,11 @@
                 abortCtl = null;
             }
             requestedKey = null;
+            // Bump the sequence token even when there's no AbortController
+            // (or the host's fetch doesn't honor `signal`) so a response
+            // that lands after this call still fails the `seq !== loadSeq`
+            // check in load()'s then/catch and can't resurrect stale data.
+            loadSeq++;
         }
 
         function clearData() {
@@ -4081,10 +4086,17 @@
             // songInfo every frame) and kick a non-blocking load.
             const key = _vizSongKey(bundle.songInfo);
             if (!key) {
-                // The host switched to a source that names no pack (loose
-                // folder / archive audio, or a stem-less sloppak). Drop the
-                // previous song's data and any in-flight load once, so its
-                // lyrics don't keep drawing over the new song.
+                // _vizResolveFilename's last resort is window.feedBack.currentSong,
+                // a page-global every highway (main or any other panel) sets once
+                // it has loaded a song. Because splitscreen panels all show the
+                // SAME song (different arrangements), that fallback resolves for
+                // almost any source once ANYTHING on the page has loaded once. A
+                // null key is therefore narrow: this renderer's very first
+                // song_info, before any highway anywhere on the page has set
+                // currentSong yet, for a source whose audio_url names no pack
+                // (loose-folder/archive audio, or a stem-less sloppak). Drop any
+                // previous data and in-flight load once regardless, so a future
+                // change to that fallback can't leave stale lyrics on screen.
                 if (loadedKey !== null || requestedKey !== null) {
                     abortInflight();
                     clearData();

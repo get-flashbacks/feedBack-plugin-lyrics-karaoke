@@ -292,7 +292,14 @@ test('a non-sloppak audio_url names no pack', () => {
 });
 
 test('an unresolvable song keys null and never fetches from a cold panel', async () => {
+    // The real, narrow trigger: this renderer's very FIRST song_info, before
+    // any highway anywhere on the page (main or another panel) has ever set
+    // window.feedBack.currentSong. Once anything has loaded once, currentSong
+    // is a live host's fallback for almost any source (see the "the fallback
+    // covers a warm panel" test below), so pin that precondition explicitly
+    // rather than relying on the stub's ambient default.
     bus.reset();
+    assert.strictEqual(window.feedBack.currentSong, undefined);
     const urls = [];
     fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([]))(); };
     const unresolvable = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
@@ -319,8 +326,17 @@ test('an unresolvable song keys null and never fetches from a cold panel', async
     r.destroy();
 });
 
-test('switching from a loaded song to an unresolvable one clears the old lyrics', async () => {
+test('the currentSong fallback keeps a warm panel resolving once anything has loaded', async () => {
+    // A previously-loaded song sets currentSong the way a real host would
+    // (main highway, or another panel — never this renderer itself). Once
+    // that's set, an ambiguous audio_url does NOT go null: it resolves via
+    // currentSong and reloads normally. The null-key clear path in syncSong
+    // is therefore NOT what protects a warm panel — this fallback is. A
+    // fixture that leaves currentSong unset here would be the same
+    // wire-impossible shape flagged in review.
     bus.reset();
+    const previousCurrentSong = window.feedBack.currentSong;
+    window.feedBack.currentSong = { filename: 'song.sloppak' };
     const urls = [];
     fetchImpl = (url) => { urls.push(url); return jsonFetch(okPayload([
         { start: 1, duration: 0.5, text: 'staleword', midi: 60 },
@@ -334,17 +350,56 @@ test('switching from a loaded song to an unresolvable one clears the old lyrics'
         const drew = () => canvas._ctx.texts.some((t) => t.t.includes('staleword'));
         assert.ok(drew(), 'the loaded song draws its lyrics');
 
-        const unresolvable = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
+        const ambiguous = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
+        assert.notStrictEqual(screen._vizSongKey(ambiguous), null,
+            'currentSong fallback must resolve this, not go null');
         canvas._ctx.texts.length = 0;
-        for (let i = 0; i < 3; i++) r.draw(bundle({ songInfo: unresolvable }));
+        r.draw(bundle({ songInfo: ambiguous }));
         await flush();
 
-        assert.ok(!drew(), "the previous song's lyrics must not keep drawing");
-        assert.strictEqual(urls.length, 1, 'no fetch for the unresolvable song');
-        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1);
+        // A reload through the fallback, not the null-key clear path: a
+        // second /playback fetch for the SAME resolved filename.
+        assert.strictEqual(urls.length, 2, 'the fallback triggers an ordinary reload, not a null-key clear');
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 0);
     } finally {
-        // Always release playback ownership, so a failure here can't cascade
-        // into the ownership tests that run later.
+        window.feedBack.currentSong = previousCurrentSong;
+        r.destroy();
+    }
+});
+
+test('a null key aborts an in-flight load so its stale response cannot land', async () => {
+    // Pins the one line review flagged as uncovered: abortInflight() inside
+    // the null-key branch. Precondition matches the real trigger above —
+    // currentSong unset, so this is this renderer's very first song_info.
+    bus.reset();
+    assert.strictEqual(window.feedBack.currentSong, undefined);
+    let resolveFetch = null;
+    fetchImpl = () => new Promise((res) => { resolveFetch = res; });
+
+    const r = window.feedBackViz_lyrics_karaoke();
+    try {
+        r.init(makeCanvas(), bundle());   // starts a load; fetch is now in flight
+        await flush();
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-ready').length, 0, 'load has not resolved yet');
+
+        const unresolvable = { audio_url: '/audio/audio_Song_abc123.mp3', arrangement: 'Vocals' };
+        r.draw(bundle({ songInfo: unresolvable }));
+
+        // The stale fetch resolves after the abort. Without abortInflight()
+        // (or without the loadSeq/destroyed guard it relies on), this would
+        // still land as a renderer-ready with the dropped song's tokens.
+        resolveFetch({
+            ok: true,
+            status: 200,
+            text: () => Promise.resolve(JSON.stringify(okPayload([
+                { start: 1, duration: 0.5, text: 'stale', midi: 60 },
+            ]))),
+        });
+        await flush();
+
+        assert.strictEqual(bus.of('lyrics_karaoke:renderer-ready').length, 0,
+            'the aborted load must not resolve into a ready event');
+    } finally {
         r.destroy();
     }
 });
