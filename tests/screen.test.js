@@ -911,16 +911,26 @@ test('a notation-only vocals chart still renders (lyrics are song-level)', async
 // ── note_detect ownership handshake ─────────────────────────────────────
 
 /** Stub note_detect's public surface: the singleton plus the factory's
- *  setDefaultSuppressed handshake. */
+ *  setDefaultSuppressed handshake.
+ *
+ *  `omitHandshake` models a legacy build (no setDefaultSuppressed, i.e.
+ *  below the 1.15.2 coexistence floor); `probes: false` models a legacy
+ *  build that exposes neither isEnabled() nor wantsDetect(), so idleness
+ *  cannot be proven; `throwOnProbe` models one whose probe throws. */
 function installNoteDetect(opts) {
     const o = opts || {};
-    const log = { suppressed: [], enabled: 0 };
+    const log = { suppressed: [], enabled: 0, disabled: 0 };
     window.noteDetect = {
-        wantsDetect: () => !!o.wantsDetect,
-        isEnabled: () => !!o.isEnabled,
         enable() { log.enabled++; return Promise.resolve(); },
-        disable() {},
+        disable() { log.disabled++; },
     };
+    if (o.probes !== false) {
+        window.noteDetect.wantsDetect = () => !!o.wantsDetect;
+        window.noteDetect.isEnabled = () => {
+            if (o.throwOnProbe) throw new Error('probe boom');
+            return !!o.isEnabled;
+        };
+    }
     window.createNoteDetector = function () { return {}; };
     if (!o.omitHandshake) {
         window.createNoteDetector.setDefaultSuppressed = (v) => {
@@ -1075,6 +1085,135 @@ test('no note_detect installed is a clean no-op', async () => {
     assert.doesNotThrow(() => r.init(makeCanvas(), bundle()));
     await flush();
     assert.doesNotThrow(() => r.destroy());
+});
+
+// ── #36: the Note Detect coexistence floor ──────────────────────────────
+// The runtime cannot read a peer's version number (the host exposes no
+// version global and no plugin registry), so the floor is enforced as a
+// capability: setDefaultSuppressed is the load-bearing half of the
+// handshake, and a legacy build is tolerated only while it can prove
+// it is not holding the microphone.
+
+test('coexistence: no note_detect is never blocked and stays optional', () => {
+    removeNoteDetect();
+    assert.strictEqual(screen._lkNoteDetectState(), null);
+    assert.strictEqual(screen._lkMicCoexistenceBlock(), null);
+});
+
+test('coexistence: a full handshake (>=1.15.2) is supported and never blocks', () => {
+    const log = installNoteDetect({ wantsDetect: true, isEnabled: true });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: true });
+        assert.strictEqual(screen._lkMicCoexistenceBlock(), null);
+    } finally {
+        removeNoteDetect();
+    }
+    void log;
+});
+
+test('coexistence: a partial handshake is supported — suppression is load-bearing', () => {
+    // A modern factory whose singleton lost the restore probes.
+    installNoteDetect({ wantsDetect: false, isEnabled: false });
+    try {
+        delete window.noteDetect.isEnabled;
+        delete window.noteDetect.wantsDetect;
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: true });
+        assert.strictEqual(screen._lkMicCoexistenceBlock(), null);
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: a legacy peer that is active blocks the mic with the floor named', () => {
+    installNoteDetect({ omitHandshake: true, isEnabled: true, wantsDetect: true });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: false, active: true });
+        const msg = screen._lkMicCoexistenceBlock();
+        assert.ok(msg, 'an active legacy peer must block');
+        assert.ok(msg.includes(screen._LK_NOTE_DETECT_MIN),
+            'the message must name the floor so the fix is actionable: ' + msg);
+        assert.match(msg, /update note detect|turn it off/i);
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: a legacy peer that is provably idle does not block', () => {
+    installNoteDetect({ omitHandshake: true, isEnabled: false, wantsDetect: false });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: false, active: false });
+        assert.strictEqual(screen._lkMicCoexistenceBlock(), null);
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: a legacy peer with no probe at all is blocked', () => {
+    installNoteDetect({ omitHandshake: true, probes: false });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: false, active: undefined });
+        assert.ok(screen._lkMicCoexistenceBlock(), 'unprovable idleness must not be assumed');
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: a throwing legacy probe counts as unprovable, so it blocks', () => {
+    installNoteDetect({ omitHandshake: true, throwOnProbe: true });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: false, active: undefined });
+        assert.ok(screen._lkMicCoexistenceBlock());
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: a throwing handshake is treated as supported, not legacy', () => {
+    installNoteDetect({ wantsDetect: true, throwOnSuppress: true });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: true });
+        assert.strictEqual(screen._lkMicCoexistenceBlock(), null);
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: the gate is evaluated per attempt, so an upgrade unblocks without a reload', () => {
+    installNoteDetect({ omitHandshake: true, probes: false });
+    try {
+        assert.ok(screen._lkMicCoexistenceBlock(), 'legacy first');
+        const log = installNoteDetect({ wantsDetect: false, isEnabled: false });
+        assert.strictEqual(screen._lkMicCoexistenceBlock(), null, 'upgraded peer unblocks');
+        assert.deepStrictEqual(log.suppressed, [], 'and can be suppressed again');
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: a detector already enabled before takeover is stood down and handed back', async () => {
+    const log = installNoteDetect({ wantsDetect: true, isEnabled: true });
+    try {
+        fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
+        const r = window.feedBackViz_lyrics_karaoke();
+        r.init(makeCanvas(), bundle());
+        await flush();
+        assert.deepStrictEqual(log.suppressed, [true], 'claim suppresses the running singleton');
+        assert.strictEqual(screen._lkMicCoexistenceBlock(), null, 'a modern peer never blocks the mic');
+        r.destroy();
+        await flush();
+        assert.deepStrictEqual(log.suppressed, [true, false]);
+        assert.strictEqual(log.enabled, 1, 'a detector the user had ON comes back');
+    } finally {
+        removeNoteDetect();
+    }
+});
+
+test('coexistence: the manifest floor matches the runtime constant', () => {
+    const manifest = require('../plugin.json');
+    assert.strictEqual(manifest.peer_requirements.note_detect.min, screen._LK_NOTE_DETECT_MIN,
+        'plugin.json and screen.js drift otherwise');
+    assert.strictEqual(manifest.peer_requirements.note_detect.optional, true,
+        'Note Detect stays optional for solo Lyrics Karaoke use');
 });
 
 test('an older note_detect without the handshake is a clean no-op', async () => {

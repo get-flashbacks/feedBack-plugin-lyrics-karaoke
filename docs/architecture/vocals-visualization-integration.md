@@ -364,9 +364,35 @@ behavior for pitch-less songs.
     summary modal pops). Per its own documentation the taking-over host
     captures `wantsDetect()` first, because suppression only blocks
     *future* auto-enables: a detector the user had ON is re-armed with
-    `noteDetect.enable()` on release. Entirely feature-detected — no
-    note_detect, or an older build without the handshake, is a clean no-op,
-    and a throwing peer cannot break renderer init.
+    noteDetect.enable()` on release. Entirely feature-detected, and a
+    throwing peer cannot break renderer init.
+
+  - **The coexistence floor (#36).** "No note_detect installed" and "an
+    older note_detect installed" are *not* equivalent, and treating them as
+    equivalent is the bug this closes. The floor is **Note Detect 1.15.2**
+    (`got-feedBack/feedBack-plugin-notedetect`): its first auditable
+    snapshot already carries `setDefaultSuppressed`, `wantsDetect()` and
+    `isEnabled()`, and every later commit keeps all three. The host exposes
+    no peer version global and no loaded-plugin registry, so the runtime
+    cannot compare versions and the gate is **capability-based**, not
+    version-based: `_lkNoteDetectState()` classifies the peer into three
+    states — `null` (absent, never blocks; Note Detect stays optional),
+    `{supported: true}` (handshake present, today's behavior unchanged), or
+    `{supported: false, active}` (legacy build). For the legacy state the
+    probe decides: an `isEnabled()`/`wantsDetect()` that returns `false`
+    *proves* the peer is idle and the mic may start; `true`, no probe at
+    all, or a throwing probe means it may already own the microphone, and
+    `_lkMicCoexistenceBlock()` refuses the claim. The state is evaluated
+    lazily on every start attempt, never cached, so upgrading the peer
+    unblocks scoring without a reload. `setDefaultSuppressed` is the
+    load-bearing half of the handshake, so a *partial* handshake is treated
+    as supported.
+  - **Blocking is scoped to the mic, never to playback.** `requestMic()` and
+    the overlay's `startMic()` return false; `canScore()` is left alone,
+    because a false `canScore()` would empty `_vizMicCandidates()` and the
+    🎤 would disappear instead of explaining itself. The control stays
+    visible but disabled, with the reason in its `title`/`aria-label` and
+    the status text. Playback and lyrics are untouched.
 
   Without the note_detect half, a karaoke panel and note_detect would both
   hold a microphone, both score, and note_detect's HUD would draw over the
@@ -504,6 +530,16 @@ there is no second YIN implementation, microphone path, or scorer.
 - The old `lyrics_karaoke.micFeedback` toggle remains honored for the legacy
   overlay, and provider scoring settings write compatible defaults back to
   the same preferences document for new panels.
+- **Note Detect older than 1.15.2 installed alongside Lyrics Karaoke:** no
+  upgrade of this plugin is required, and nothing about song preparation or
+  playback changes. What changes is that microphone feedback is withheld
+  rather than running in parallel with a peer that cannot hand off
+  ownership. The 🎤 control stays visible and carries the reason; upgrading
+  Note Detect (or disabling it) restores scoring on the next click, with no
+  reload. The floor is also recorded in `plugin.json` under the additive,
+  ignore-if-unknown `peer_requirements` key — a documentation-grade
+  extension, not a ratified spec key, and a test pins it to the constant in
+  `screen.js` so the two cannot drift.
 
 ### Fallback and rollback
 
@@ -516,6 +552,12 @@ there is no second YIN implementation, microphone path, or scorer.
 - The provider and overlay never render/scoring controls simultaneously: a
   live provider instance claims playback ownership, suppresses the overlay
   and note_detect, and releases ownership on teardown.
+- With a legacy note_detect peer (below 1.15.2, or with the handshake
+  missing/partial) the fallback is deliberately **not** "both run anyway": we
+  never suppressed that peer and cannot, so the karaoke side stops scoring
+  and says so. The residual limitation is honest — the legacy peer's
+  HUD can still draw over the ribbon, because that build exposes no
+  suppression API.
 - Duet packs may keep singular `lyrics` / `vocal_pitch` aliases pointing at
   the primary voice for older readers. If an alias drifts away from the
   primary `vocal_tracks[]` entry, `/playback` warns at route time so authors

@@ -1,7 +1,7 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.12.2",
+  "version": "1.12.3",
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"
@@ -120,5 +120,13 @@
   "description": "Karaoke-style synced lyrics during playback.",
   "icon": "assets/thumb.svg",
   "type": "visualization",
-  "minHost": "0.3.0-alpha.1"
+  "minHost": "0.3.0-alpha.1",
+  "peer_requirements": {
+    "_note": "Extension key, not yet ratified by the plugin spec. Hosts MUST ignore manifest keys they do not recognise, so this is additive and inert today.",
+    "note_detect": {
+      "min": "1.15.2",
+      "optional": true,
+      "reason": "Below 1.15.2 Note Detect cannot hand off microphone ownership, so Lyrics Karaoke withholds mic feedback rather than scoring in parallel."
+    }
+  }
 }

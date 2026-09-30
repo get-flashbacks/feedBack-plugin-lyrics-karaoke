@@ -932,6 +932,68 @@ test('provider: the legacy overlay cannot take the mic while a panel holds it', 
     r.destroy();
 });
 
+test('provider: a legacy note_detect peer blocks the mic without touching playback', async () => {
+    const before = media.gum;
+    // Legacy: no setDefaultSuppressed (below the 1.15.2 floor) and no way to
+    // prove it is idle.
+    window.createNoteDetector = function () { return {}; };
+    window.noteDetect = { enable() { return Promise.resolve(); }, disable() {} };
+    const { r } = await mountPanel();
+    try {
+        assert.doesNotThrow(() => r.draw({ currentTime: 0, songInfo: songInfo() }),
+            'lyrics playback is unaffected by the block');
+        assert.strictEqual(r.canScore(), true, 'the panel stays eligible');
+        assert.strictEqual(await r.requestMic(), false, 'the mic claim is refused');
+        assert.strictEqual(media.gum, before, 'getUserMedia must not be called at all');
+        assert.strictEqual(r.ownsMic(), false);
+        assert.match(screen._lkMicCoexistenceBlock(), /1\.15\.2/);
+    } finally {
+        r.destroy();
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+    assert.strictEqual(media.gum, before, 'still nothing after teardown');
+});
+
+test('provider: a legacy note_detect peer that is provably idle leaves the mic alone', async () => {
+    const before = media.gum;
+    window.createNoteDetector = function () { return {}; };
+    window.noteDetect = {
+        wantsDetect: () => false,
+        isEnabled: () => false,
+        enable() { return Promise.resolve(); },
+        disable() {},
+    };
+    const { r } = await mountPanel();
+    try {
+        assert.strictEqual(await r.requestMic(), true);
+        assert.strictEqual(media.gum, before + 1);
+    } finally {
+        r.destroy();
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
+test('overlay: setKaraokeMode auto-start is gated through the legacy-peer check', async () => {
+    const before = media.gum;
+    window.createNoteDetector = function () { return {}; };
+    window.noteDetect = { enable() { return Promise.resolve(); }, disable() {} };
+    const { r } = await mountPanel();
+    try {
+        r.destroy();                     // hand playback back to the overlay
+        screen.setKaraokeMode(true);
+        await flush();
+        assert.strictEqual(screen._lkMic.getState().state, 'off',
+            'the overlay must not auto-start the mic under a legacy peer');
+        assert.strictEqual(media.gum, before);
+    } finally {
+        screen.setKaraokeMode(false);
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
 test('provider: destroy releases the mic and stops every track', async () => {
     const { r } = await mountPanel();
     await r.requestMic();

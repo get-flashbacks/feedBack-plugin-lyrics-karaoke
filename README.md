@@ -29,6 +29,16 @@ needs the host's song library and, for alignment, a configured alignment
 server. Pitch generation uses the plugin's Python audio dependencies in
 `requirements.txt`.
 
+**Note Detect 1.15.2 or newer is required to run the two together.** Note
+Detect remains optional: Lyrics Karaoke works fully on its own. That floor is
+the first Note Detect release whose ownership handshake lets the karaoke
+visualization take the microphone and hand it back cleanly. With an older Note
+Detect installed, lyrics playback is unaffected but microphone feedback is
+withheld and the 🎤 control explains why — update Note Detect, or turn it off to
+sing here. The plugin cannot read a peer's version number (the host exposes
+no version global or plugin registry), so the check is capability-based: the
+floor is enforced by looking for the handshake itself.
+
 ## Prepare a song
 
 Open **Lyrics Karaoke** from FeedBack's plugin navigation, choose a song with
@@ -57,7 +67,9 @@ Microphone access starts only when you click the shared **🎤** control.
 Permission can be denied without stopping lyric playback. The device and
 channel selectors support a default mic or a multichannel interface; the
 scoring-panel selector chooses which vocals panel owns the microphone in
-splitscreen. Only one panel can own it at a time. Closing the panel, changing
+splitscreen. Only one panel can own it at a time. If an older Note Detect that
+cannot hand off ownership is installed, the mic is not started at all and the
+control stays visible but disabled with the upgrade reason. Closing the panel, changing
 song or part, or stopping capture releases the stream. Audio is analyzed in
 the plugin for pitch; raw audio is not stored or transmitted.
 
