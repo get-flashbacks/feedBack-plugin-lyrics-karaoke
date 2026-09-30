@@ -1089,19 +1089,44 @@ test('overlay: a modern peer leaves the mic button enabled', async () => {
     }
 });
 
-test('overlay: setKaraokeMode auto-start is gated through the legacy-peer check', async () => {
+test('overlay: startMic refuses a legacy peer without reaching getUserMedia', async () => {
     const before = media.gum;
     window.createNoteDetector = function () { return {}; };
     window.noteDetect = { enable() { return Promise.resolve(); }, disable() {} };
     const { r } = await mountPanel();
     try {
         r.destroy();                     // hand playback back to the overlay
-        screen.setKaraokeMode(true);
-        await flush();
-        assert.strictEqual(screen._lkMic.getState().state, 'off',
-            'the overlay must not auto-start the mic under a legacy peer');
-        assert.strictEqual(media.gum, before);
+        assert.ok(screen._lkMicCoexistenceBlock(), 'fixture really is a blocking legacy peer');
+        // Driven directly: the auto-start branch at screen.js:414 needs
+        // micWantOnForSong, which only a *successful* startMic ever sets, so
+        // a peer that blocks every start can never make that precondition
+        // true. Toggling karaoke therefore cannot reach the guard, and this
+        // is the only route that does — the 🎤 click in production.
+        await screen._lkOverlayUi.startMic();
+        assert.strictEqual(media.gum, before, 'a legacy peer must not reach getUserMedia');
+        assert.strictEqual(screen._lkMic.getState().state, 'off');
     } finally {
+        screen.setKaraokeMode(false);
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
+test('overlay: startMic reaches getUserMedia when the peer is supported', async () => {
+    const before = media.gum;
+    window.noteDetect = {
+        wantsDetect: () => false, isEnabled: () => false,
+        enable() { return Promise.resolve(); }, disable() {},
+    };
+    window.createNoteDetector = function () { return {}; };
+    window.createNoteDetector.setDefaultSuppressed = () => {};
+    const { r } = await mountPanel();
+    try {
+        r.destroy();
+        await screen._lkOverlayUi.startMic();
+        assert.strictEqual(media.gum, before + 1, 'the mirror case: >=1.15.2 still gets the mic');
+    } finally {
+        screen._lkMic.release(screen._lkOverlayOwner);
         screen.setKaraokeMode(false);
         delete window.noteDetect;
         delete window.createNoteDetector;

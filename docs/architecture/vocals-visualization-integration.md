@@ -379,20 +379,29 @@ behavior for pitch-less songs.
     states — `null` (absent, never blocks; Note Detect stays optional),
     `{supported: true}` (handshake present, today's behavior unchanged), or
     `{supported: false, active}` (legacy build). For the legacy state the
-    probe decides: an `isEnabled()`/`wantsDetect()` that returns `false`
-    *proves* the peer is idle and the mic may start; `true`, no probe at
-    all, or a throwing probe means it may already own the microphone, and
-    `_lkMicCoexistenceBlock()` refuses the claim. The state is evaluated
-    lazily on every start attempt, never cached, so upgrading the peer
-    unblocks scoring without a reload. `setDefaultSuppressed` is the
-    load-bearing half of the handshake, so a *partial* handshake is treated
-    as supported.
+    probes decide, and they are read **independently, not
+    short-circuited**: the peer is idle only when *every* probe it
+    exposes returns `false`. `isEnabled()` alone cannot establish that,
+    because in note_detect it is the live toggle while `wantsDetect()` is
+    the persisted *intent* (`detectPreference` defaults to `true`), and
+    the peer resolves that intent itself at the next song boundary — it
+    calls `enable()` whenever `wantsDetect() && !isEnabled()`. Reading
+    `isEnabled()` first would therefore hand the mic to a default-install
+    legacy peer and be ambushed one song later. Any probe returning
+    `true`, no probe at all, or a throwing probe all mean *may own the
+    microphone*, and `_lkMicCoexistenceBlock()` refuses the claim. This
+    is the same signal `_vizSuppressNoteDetect()` reads, and only ever
+    makes the gate stricter. The state is evaluated lazily on every
+    start attempt, never cached, so upgrading the peer unblocks scoring
+    without a reload. `setDefaultSuppressed` is the load-bearing half of
+    the handshake, so a *partial* handshake is treated as supported.
   - **Blocking is scoped to the mic, never to playback.** `requestMic()` and
     the overlay's `startMic()` return false; `canScore()` is left alone,
     because a false `canScore()` would empty `_vizMicCandidates()` and the
     🎤 would disappear instead of explaining itself. The control stays
-    visible but disabled, with the reason in its `title`/`aria-label` and
-    the status text. Playback and lyrics are untouched.
+    visible but disabled, with the full reason in its `title`/`aria-label`
+    and a short `Note Detect too old` label in the 11px inline status
+    span. Playback and lyrics are untouched.
 
   Without both halves — no handshake *and* no floor to block on it — a
   karaoke panel and note_detect would both hold a microphone, both score,

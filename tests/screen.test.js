@@ -1148,6 +1148,23 @@ test('coexistence: a legacy peer that is provably idle does not block', () => {
     }
 });
 
+test('coexistence: a legacy peer armed to auto-enable blocks even while its toggle is off', () => {
+    // The default-install shape: wantsDetect() is the persisted intent and
+    // defaults to true, isEnabled() is only the live toggle. note_detect
+    // calls enable() itself at the next song boundary whenever
+    // wantsDetect() && !isEnabled(), so isEnabled() === false is the
+    // pre-auto-enable state, not proof of idleness. Probing isEnabled()
+    // first would hand over the mic and be ambushed one song later.
+    installNoteDetect({ omitHandshake: true, isEnabled: false, wantsDetect: true });
+    try {
+        assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: false, active: true },
+            'a live intent must not be shadowed by an off toggle');
+        assert.ok(screen._lkMicCoexistenceBlock());
+    } finally {
+        removeNoteDetect();
+    }
+});
+
 test('coexistence: a legacy peer with no probe at all is blocked', () => {
     installNoteDetect({ omitHandshake: true, probes: false });
     try {

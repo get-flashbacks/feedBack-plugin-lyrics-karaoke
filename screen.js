@@ -2752,7 +2752,11 @@
 
         if (blocked) {
             // Visible but disabled: a hidden control can't be actionable.
-            _vizSetMicButtonState(ui, true, BTN_CLASS_DISABLED, blocked, blocked);
+            // The status span is 11px inline next to the button (see
+            // _vizBuildMicUi), so it gets a short label; the full reason
+            // stays in title/aria-label, which are hover/AT surfaces. Same
+            // split the neighbouring `busy` branch uses.
+            _vizSetMicButtonState(ui, true, BTN_CLASS_DISABLED, blocked, 'Note Detect too old');
             return;
         }
         if (busy) {
@@ -2866,16 +2870,30 @@
      *                                 optional and never blocks.
      *  `{supported: true}`           — handshake present (>= 1.15.2): we can
      *                                 suppress and restore it, mic allowed.
-     *  `{supported: false, active}` — legacy build. `active: false` means a
-     *                                 probe (`isEnabled()`/`wantsDetect()`)
-     *                                 proves it idle, so mic is allowed;
-     *                                 `true`/`undefined` means it may own
-     *                                 the microphone, so we refuse.
+     *  `{supported: false, active}` — legacy build. `active: false` means
+     *                                 every probe it exposes reports `false`,
+     *                                 so it is idle and not armed to take
+     *                                 the mic; `true`/`undefined` means it may
+     *                                 own the microphone, so we refuse.
+     *
+     *  The two probes are NOT interchangeable and must not be
+     *  short-circuited against each other. In note_detect `isEnabled()` is
+     *  the live toggle while `wantsDetect()` is the persisted *intent*
+     *  (`let detectPreference = true` on a default install), and the peer
+     *  resolves that intent itself at the next song boundary — it calls
+     *  `enable()` whenever `wantsDetect() && !isEnabled()`. So
+     *  `isEnabled() === false` is exactly the pre-auto-enable state, not
+     *  proof of idleness: trusting it first would let karaoke take the mic on
+     *  a default-install legacy peer and be ambushed one song later, which
+     *  is the collision this whole path exists to prevent. Hence: every
+     *  probe is read independently, and the peer is idle only when all of
+     *  them say `false`. This matches how _vizSuppressNoteDetect() reads
+     *  the same signal, and only ever makes the gate stricter.
      *
      *  Evaluated on every start attempt rather than cached, so upgrading the
      *  peer mid-session unblocks without a reload. Each probe is its own
      *  try/catch: a throwing peer must not break init, and a throw counts as
-     *  "unprovable" (the safe direction). */
+     *  "unprovable" (the safe direction), never as a `false`. */
     function _lkNoteDetectState() {
         const factory = typeof window === 'undefined' ? null : window.createNoteDetector;
         if (!factory) return null;
@@ -2883,15 +2901,20 @@
             return { supported: true };
         }
         const singleton = window.noteDetect;
-        let active;
-        try {
-            if (singleton && typeof singleton.isEnabled === 'function') {
-                active = !!singleton.isEnabled();
-            } else if (singleton && typeof singleton.wantsDetect === 'function') {
-                active = !!singleton.wantsDetect();
-            }
-        } catch (_) { active = undefined; }
-        return { supported: false, active };
+        let sawProbe = false;
+        let wants = false;
+        let enabled = false;
+        let unprovable = false;
+        if (singleton && typeof singleton.isEnabled === 'function') {
+            sawProbe = true;
+            try { enabled = !!singleton.isEnabled(); } catch (_) { unprovable = true; }
+        }
+        if (singleton && typeof singleton.wantsDetect === 'function') {
+            sawProbe = true;
+            try { wants = !!singleton.wantsDetect(); } catch (_) { unprovable = true; }
+        }
+        if (!sawProbe || unprovable) return { supported: false, active: undefined };
+        return { supported: false, active: wants || enabled };
     }
 
     /** The reason string shown to the user when mic/scoring must not start,
@@ -4546,6 +4569,12 @@
                 onSongLoaded,
                 refreshButtonState,
                 refreshMicUi,
+                // The overlay's getUserMedia entry point. Reachable in
+                // production through the 🎤 click; the auto-start branch
+                // needs micWantOnForSong, which only a *successful* start
+                // ever sets, so a peer that blocks every start can never
+                // make that precondition true and the toggle can't cover it.
+                startMic,
             },
             _vizOnMicClick,
             _vizMicTarget,
