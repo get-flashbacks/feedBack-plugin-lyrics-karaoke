@@ -394,9 +394,9 @@ behavior for pitch-less songs.
     visible but disabled, with the reason in its `title`/`aria-label` and
     the status text. Playback and lyrics are untouched.
 
-  Without the note_detect half, a karaoke panel and note_detect would both
-  hold a microphone, both score, and note_detect's HUD would draw over the
-  ribbon.
+  Without both halves — no handshake *and* no floor to block on it — a
+  karaoke panel and note_detect would both hold a microphone, both score,
+  and note_detect's HUD would draw over the ribbon.
 
 - **Deeper note_detect integration is a #11 decision, not a #14 one.**
   Beyond ownership, two further integrations are worth evaluating there

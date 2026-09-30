@@ -11,6 +11,7 @@
 'use strict';
 
 const test = require('node:test');
+const { after } = require('node:test');
 const assert = require('node:assert');
 
 // ── Host stubs (screen.js needs a window to evaluate) ───────────────────
@@ -970,6 +971,119 @@ test('provider: a legacy note_detect peer that is provably idle leaves the mic a
         assert.strictEqual(media.gum, before + 1);
     } finally {
         r.destroy();
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
+// ── Legacy overlay mic button (#36) ─────────────────────────────────────
+// The overlay's 🎤 is only ever built by ensureToggleButton() from a real
+// host `#btn-lyrics`, and it is the one surface where the coexistence
+// block is user-visible. Without a DOM harness none of refreshMicUi()'s
+// states can run at all — which is how a ReferenceError on that path once
+// sat under a fully green suite. These tests drive the real button.
+
+/** Minimal DOM good enough for ensureToggleButton()/refreshMicUi(): the
+ *  host's lyrics button plus a parent for the injected controls. */
+function installHostDom() {
+    const parent = {
+        children: [],
+        insertBefore(node) { this.children.push(node); node.parentNode = this; },
+    };
+    const lyricsBtn = { id: 'btn-lyrics', parentNode: parent, nextSibling: null };
+    const els = { 'btn-lyrics': lyricsBtn };
+    const realDoc = global.document;
+    global.document = {
+        readyState: 'complete',
+        addEventListener() {},
+        getElementById: (id) => els[id] || null,
+        createElement: (tag) => ({
+            tagName: String(tag).toUpperCase(), style: {}, children: [],
+            className: '', textContent: '', title: '', disabled: false,
+            parentNode: null, nextSibling: null,
+            _attrs: {},
+            setAttribute(k, v) { this._attrs[k] = v; },
+            getAttribute(k) { return this._attrs[k]; },
+            addEventListener() {},
+            appendChild(c) { this.children.push(c); c.parentNode = this; },
+            insertBefore(c) { this.children.push(c); c.parentNode = this; },
+            removeChild(c) { this.children = this.children.filter((x) => x !== c); },
+            getBoundingClientRect: () => ({ width: 800, height: 140 }),
+            getContext: () => null,
+            width: 0, height: 0,
+        }),
+    };
+    return {
+        parent,
+        find: (id) => parent.children.find((c) => c && c.id === id) || null,
+        restore: () => { global.document = realDoc; },
+    };
+}
+
+// One shared harness: ensureToggleButton() is idempotent by design (the
+// button is created once per page, like the real host), so a per-test DOM
+// would leave the module holding the first test's already-built button and
+// silently assert against the wrong surface.
+const overlayDom = installHostDom();
+global.requestAnimationFrame = () => 0;   // no rAF loop in tests
+after(() => {
+    overlayDom.restore();
+    screen.setKaraokeMode(false);
+});
+
+const overlayMicBtn = () => {
+    screen._lkOverlayUi.ensureToggleButton();
+    return overlayDom.find('btn-karaoke-mic');
+};
+
+async function loadOverlaySong() {
+    fetchImpl = (url) => (url.includes('/status')
+        ? jsonFetch({ has_lyrics: true, has_vocals: true, has_pitch: true })()
+        : jsonFetch({ tokens: [{ start: 1, duration: 1, w: 'la', midi: 69 }] })());
+    await screen._lkOverlayUi.onSongLoaded({ filename: 'song.sloppak', format: 'sloppak' });
+    screen.setKaraokeMode(true);
+    screen._lkOverlayUi.refreshMicUi();
+}
+
+test('overlay: the mic button renders the disabled upgrade state under a legacy peer', async () => {
+    window.createNoteDetector = function () { return {}; };
+    window.noteDetect = { enable() { return Promise.resolve(); }, disable() {} };
+    try {
+        const btn = overlayMicBtn();
+        assert.ok(btn, 'the mic button must be built from the host #btn-lyrics');
+        await loadOverlaySong();
+
+        assert.strictEqual(btn.style.display, '', 'the control stays visible so it can be actionable');
+        assert.strictEqual(btn.disabled, true, 'but it cannot start a dual-ownership session');
+        assert.match(btn.title, /1\.15\.2/, 'the reason names the floor: ' + btn.title);
+        assert.strictEqual(btn.getAttribute('aria-label'), btn.title);
+        assert.strictEqual(btn.getAttribute('aria-pressed'), 'false');
+        assert.doesNotThrow(() => screen._lkOverlayUi.refreshMicUi(),
+            'the refresh path must not throw');
+    } finally {
+        screen.setKaraokeMode(false);
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
+test('overlay: a modern peer leaves the mic button enabled', async () => {
+    const log = { suppressed: [] };
+    window.noteDetect = {
+        wantsDetect: () => false, isEnabled: () => false,
+        enable() { return Promise.resolve(); }, disable() {},
+    };
+    window.createNoteDetector = function () { return {}; };
+    window.createNoteDetector.setDefaultSuppressed = (v) => log.suppressed.push(!!v);
+    try {
+        const btn = overlayMicBtn();
+        await loadOverlaySong();
+
+        assert.strictEqual(btn.style.display, '');
+        assert.strictEqual(btn.disabled, false, '>=1.15.2 keeps the mic available');
+        assert.ok(!/1\.15\.2/.test(btn.title), 'no block message: ' + btn.title);
+    } finally {
+        screen.setKaraokeMode(false);
         delete window.noteDetect;
         delete window.createNoteDetector;
     }

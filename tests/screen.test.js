@@ -1168,7 +1168,11 @@ test('coexistence: a throwing legacy probe counts as unprovable, so it blocks', 
     }
 });
 
-test('coexistence: a throwing handshake is treated as supported, not legacy', () => {
+test('coexistence: a peer that throws on suppress still counts as supported', () => {
+    // The classifier only reads `typeof factory.setDefaultSuppressed`, so a
+    // peer that throws when *called* is still a modern build: the gate must
+    // not misclassify it as legacy and withhold the mic. The throw itself is
+    // absorbed by _vizSuppressNoteDetect's own try/catch.
     installNoteDetect({ wantsDetect: true, throwOnSuppress: true });
     try {
         assert.deepStrictEqual(screen._lkNoteDetectState(), { supported: true });

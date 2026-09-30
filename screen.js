@@ -1760,8 +1760,8 @@
         // Held by a provider panel — not ours to toggle.
         const busy = shared.ownerId !== null && shared.ownerId !== _lkOverlayOwner.id
             && (shared.state === 'requesting' || shared.state === 'listening' || shared.state === 'suspended');
-        const st = blocked ? 'blocked' : (busy ? 'busy' : overlayMicState());
         const blocked = _lkMicCoexistenceBlock();
+        const st = blocked ? 'blocked' : (busy ? 'busy' : overlayMicState());
         const lastError = st === 'error' ? shared.error : '';
         switch (st) {
             case 'blocked':
@@ -4537,6 +4537,16 @@
             _LK_NOTE_DETECT_MIN,
             _lkNoteDetectState,
             _lkMicCoexistenceBlock,
+            // #36: the legacy overlay's mic button is only ever built by
+            // ensureToggleButton() from a real #btn-lyrics host element,
+            // so without this seam none of refreshMicUi()'s states —
+            // including the new 'blocked' one — can be exercised at all.
+            _lkOverlayUi: {
+                ensureToggleButton,
+                onSongLoaded,
+                refreshButtonState,
+                refreshMicUi,
+            },
             _vizOnMicClick,
             _vizMicTarget,
             _vizSelectMicTarget,
