@@ -1220,14 +1220,21 @@ test('coexistence: the manifest floor matches the runtime constant', () => {
         'Note Detect stays optional for solo Lyrics Karaoke use');
 });
 
-test('an older note_detect without the handshake is a clean no-op', async () => {
+test('an older note_detect without the handshake does not break renderer init', async () => {
+    // Not a "clean no-op" — since #36 an unprovable legacy peer withholds
+    // the mic. What must still hold is that owning/handing back playback
+    // and the draw loop are untouched by a peer we cannot suppress.
     installNoteDetect({ wantsDetect: true, omitHandshake: true });
     try {
         fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
         const r = window.feedBackViz_lyrics_karaoke();
-        assert.doesNotThrow(() => r.init(makeCanvas(), bundle()));
+        const canvas = makeCanvas();
+        assert.doesNotThrow(() => r.init(canvas, bundle()));
         await flush();
+        assert.doesNotThrow(() => r.draw(bundle()));
+        assert.ok(canvas._ctx.calls.includes('fillText'), 'the renderer still draws');
         assert.doesNotThrow(() => r.destroy());
+        assert.strictEqual(screen._vizOwnsPlayback(), false);
     } finally {
         removeNoteDetect();
     }
