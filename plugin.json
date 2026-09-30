@@ -1,7 +1,7 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.12.5",
+  "version": "1.12.6",
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"

@@ -1222,10 +1222,14 @@ test('coexistence: the manifest floor matches the runtime constant', () => {
 
 test('an older note_detect without the handshake does not break renderer init', async () => {
     // Not a "clean no-op" — since #36 an unprovable legacy peer withholds
-    // the mic. What must still hold is that owning/handing back playback
-    // and the draw loop are untouched by a peer we cannot suppress.
-    installNoteDetect({ wantsDetect: true, omitHandshake: true });
+    // the mic. `probes: false` is what makes this fixture that peer: the
+    // default stub's isEnabled() returns false, which would *prove* it idle
+    // and let the mic through. What must still hold either way is that
+    // owning/handing back playback and the draw loop are untouched by a peer
+    // we cannot suppress.
+    installNoteDetect({ omitHandshake: true, probes: false });
     try {
+        assert.ok(screen._lkMicCoexistenceBlock(), 'the fixture really is a blocking legacy peer');
         fetchImpl = jsonFetch(okPayload([{ start: 1, duration: 1, text: 'a', midi: 60 }]));
         const r = window.feedBackViz_lyrics_karaoke();
         const canvas = makeCanvas();
