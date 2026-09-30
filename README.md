@@ -34,10 +34,10 @@ Detect remains optional: Lyrics Karaoke works fully on its own. That floor is
 the first Note Detect release whose ownership handshake lets the karaoke
 visualization take the microphone and hand it back cleanly. With an older Note
 Detect installed, lyrics playback is unaffected but microphone feedback is
-withheld and the 🎤 control explains why — update Note Detect, or turn it off to
-sing here. The plugin cannot read a peer's version number (the host exposes
-no version global or plugin registry), so the check is capability-based: the
-floor is enforced by looking for the handshake itself.
+withheld and the 🎤 control explains why — updating Note Detect restores it on
+your next click, with no reload. The plugin cannot read a peer's version number
+(the host exposes no version global or plugin registry), so the check is
+capability-based: the floor is enforced by looking for the handshake itself.
 
 ## Prepare a song
 

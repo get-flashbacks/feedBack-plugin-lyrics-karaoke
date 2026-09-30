@@ -1045,7 +1045,7 @@ async function loadOverlaySong() {
     screen._lkOverlayUi.refreshMicUi();
 }
 
-test('overlay: the mic button renders the disabled upgrade state under a legacy peer', async () => {
+test('overlay: the mic button renders the blocked upgrade state under a legacy peer', async () => {
     window.createNoteDetector = function () { return {}; };
     window.noteDetect = { enable() { return Promise.resolve(); }, disable() {} };
     try {
@@ -1054,13 +1054,56 @@ test('overlay: the mic button renders the disabled upgrade state under a legacy 
         await loadOverlaySong();
 
         assert.strictEqual(btn.style.display, '', 'the control stays visible so it can be actionable');
-        assert.strictEqual(btn.disabled, true, 'but it cannot start a dual-ownership session');
+        // Styled disabled, NOT natively disabled: a disabled button fires no
+        // click, so onMicClick could never re-read the peer and the control
+        // would latch. startMic()'s guard is what refuses, every attempt.
+        assert.strictEqual(btn.disabled, false,
+            'a natively disabled button latches — nothing could re-check the gate');
+        assert.match(btn.className, /cursor-not-allowed/,
+            'but it still reads as disabled: ' + btn.className);
+        assert.strictEqual(btn.getAttribute('aria-disabled'), 'true',
+            'and assistive tech is told, since the native flag cannot say it');
         assert.match(btn.title, /1\.15\.2/, 'the reason names the floor: ' + btn.title);
         assert.strictEqual(btn.getAttribute('aria-label'), btn.title);
         assert.strictEqual(btn.getAttribute('aria-pressed'), 'false');
         assert.doesNotThrow(() => screen._lkOverlayUi.refreshMicUi(),
             'the refresh path must not throw');
     } finally {
+        screen.setKaraokeMode(false);
+        delete window.noteDetect;
+        delete window.createNoteDetector;
+    }
+});
+
+test('overlay: the blocked mic button recovers on the next attempt once the peer is gone', async () => {
+    const before = media.gum;
+    window.createNoteDetector = function () { return {}; };
+    window.noteDetect = { enable() { return Promise.resolve(); }, disable() {} };
+    try {
+        const btn = overlayMicBtn();
+        await loadOverlaySong();
+        assert.strictEqual(btn.getAttribute('aria-disabled'), 'true');
+
+        // What the 🎤 click does. A still-blocked peer must be refused...
+        await screen._lkOverlayUi.startMic();
+        assert.strictEqual(media.gum, before, 'the guard still refuses');
+        assert.strictEqual(btn.getAttribute('aria-disabled'), 'true', 'and the state survives the attempt');
+
+        // ...and nothing else re-renders the peer, so the next attempt is the
+        // only thing that can notice it changed. This is the whole reason the
+        // blocked button stays clickable.
+        window.createNoteDetector.setDefaultSuppressed = () => {};
+        window.noteDetect = {
+            wantsDetect: () => false, isEnabled: () => false,
+            enable() { return Promise.resolve(); }, disable() {},
+        };
+        await screen._lkOverlayUi.startMic();
+
+        assert.strictEqual(media.gum, before + 1, 'the next attempt takes the mic, no reload');
+        assert.strictEqual(btn.getAttribute('aria-disabled'), 'false');
+        assert.doesNotMatch(btn.title, /1\.15\.2/, 'the stale reason is cleared: ' + btn.title);
+    } finally {
+        screen._lkMic.release(screen._lkOverlayOwner);
         screen.setKaraokeMode(false);
         delete window.noteDetect;
         delete window.createNoteDetector;
@@ -1097,11 +1140,13 @@ test('overlay: startMic refuses a legacy peer without reaching getUserMedia', as
     try {
         r.destroy();                     // hand playback back to the overlay
         assert.ok(screen._lkMicCoexistenceBlock(), 'fixture really is a blocking legacy peer');
-        // Driven directly: the auto-start branch at screen.js:414 needs
-        // micWantOnForSong, which only a *successful* startMic ever sets, so
-        // a peer that blocks every start can never make that precondition
-        // true. Toggling karaoke therefore cannot reach the guard, and this
-        // is the only route that does — the 🎤 click in production.
+        // Driven directly, which is what the 🎤 click does — the blocked
+        // button is styled disabled but not natively disabled, precisely so
+        // the click still reaches this guard and re-reads the peer. The
+        // auto-start branch at screen.js:414 needs micWantOnForSong, which
+        // only a *successful* startMic ever sets, so a peer that blocks
+        // every start can never make that precondition true and toggling
+        // karaoke cannot cover it.
         await screen._lkOverlayUi.startMic();
         assert.strictEqual(media.gum, before, 'a legacy peer must not reach getUserMedia');
         assert.strictEqual(screen._lkMic.getState().state, 'off');

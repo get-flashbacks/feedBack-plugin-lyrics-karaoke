@@ -399,9 +399,15 @@ behavior for pitch-less songs.
     the overlay's `startMic()` return false; `canScore()` is left alone,
     because a false `canScore()` would empty `_vizMicCandidates()` and the
     🎤 would disappear instead of explaining itself. The control stays
-    visible but disabled, with the full reason in its `title`/`aria-label`
-    and a short `Note Detect too old` label in the 11px inline status
-    span. Playback and lyrics are untouched.
+    visible, styled disabled but *not* natively disabled, with the full
+    reason in its `title`/`aria-label` and a short `Note Detect too old`
+    label in the 11px inline status span. Leaving it clickable is
+    load-bearing rather than cosmetic: a natively disabled button dispatches
+    no click, so nothing would re-read the peer and the control would latch
+    after the one event that could have recovered it. Every attempt is
+    therefore re-evaluated against the live peer — matching how the guards
+    are documented — and the disabled styling plus `aria-disabled` keep it
+    honest for hover and assistive tech. Playback and lyrics are untouched.
 
   Without both halves — no handshake *and* no floor to block on it — a
   karaoke panel and note_detect would both hold a microphone, both score,
@@ -543,12 +549,16 @@ there is no second YIN implementation, microphone path, or scorer.
   upgrade of this plugin is required, and nothing about song preparation or
   playback changes. What changes is that microphone feedback is withheld
   rather than running in parallel with a peer that cannot hand off
-  ownership. The 🎤 control stays visible and carries the reason; upgrading
-  Note Detect (or disabling it) restores scoring on the next click, with no
-  reload. The floor is also recorded in `plugin.json` under the additive,
-  ignore-if-unknown `peer_requirements` key — a documentation-grade
-  extension, not a ratified spec key, and a test pins it to the constant in
-  `screen.js` so the two cannot drift.
+  ownership. The 🎤 control stays visible and carries the reason, and stays
+  clickable, so upgrading Note Detect restores scoring on the next click,
+  with no reload. Disabling the peer is deliberately **not** advertised as
+  an equivalent remedy: note_detect clears its persisted intent only from
+  the branch of its toggle that needs it enabled, so a peer it cannot keep
+  enabled re-arms that intent on every click, and a live intent is exactly
+  what this gate refuses to read as idle. The floor is also recorded in
+  `plugin.json` under the additive, ignore-if-unknown `peer_requirements`
+  key — a documentation-grade extension, not a ratified spec key, and a
+  test pins it to the constant in `screen.js` so the two cannot drift.
 
 ### Fallback and rollback
 

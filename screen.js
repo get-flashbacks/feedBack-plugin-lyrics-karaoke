@@ -1765,7 +1765,13 @@
         const lastError = st === 'error' ? shared.error : '';
         switch (st) {
             case 'blocked':
-                micBtn.disabled = true;
+                // Not `disabled`: a disabled button dispatches no click, so
+                // onMicClick would never reach startMic()'s guard and
+                // nothing would re-read the peer — a latched control with no
+                // route out. Styled disabled and left clickable instead, so
+                // every attempt re-checks the gate (which refuses either way)
+                // and an upgraded peer takes the mic on the next click.
+                micBtn.disabled = false;
                 micBtn.className = BTN_CLASS_DISABLED;
                 micBtn.title = blocked;
                 micBtn.setAttribute('aria-label', blocked);
@@ -1813,6 +1819,12 @@
                 }
                 break;
         }
+        // Mirror the rendered state for assistive tech, derived rather than
+        // set per branch: the blocked branch styles the control disabled
+        // while leaving it clickable, so neither the native flag nor a
+        // hand-written attribute per branch can be trusted to stay right
+        // across state changes.
+        micBtn.setAttribute('aria-disabled', (st === 'blocked' || micBtn.disabled) ? 'true' : 'false');
     }
 
     function updateMicPill() {
@@ -2741,6 +2753,10 @@
 
     function _vizSetMicButtonState(ui, disabled, className, title, status) {
         ui.btn.disabled = disabled;
+        // Mirror the native flag for assistive tech, derived here so it can
+        // never go stale; the blocked branch overrides it, because it styles
+        // the control disabled while leaving it clickable.
+        ui.btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
         ui.btn.className = className;
         ui.btn.title = title;
         if (status !== undefined) _vizSetMicStatus(status);
@@ -2751,12 +2767,16 @@
         ui.btn.setAttribute('aria-pressed', ours && snap.state !== 'error' ? 'true' : 'false');
 
         if (blocked) {
-            // Visible but disabled: a hidden control can't be actionable.
-            // The status span is 11px inline next to the button (see
+            // Styled disabled, but NOT natively disabled: a disabled
+            // <button> dispatches no click, so _vizOnMicClick would never
+            // reach requestMic()'s guard and the panel could not recover on
+            // its own. Every click re-checks the gate, which refuses either
+            // way. The status span is 11px inline next to the button (see
             // _vizBuildMicUi), so it gets a short label; the full reason
             // stays in title/aria-label, which are hover/AT surfaces. Same
             // split the neighbouring `busy` branch uses.
-            _vizSetMicButtonState(ui, true, BTN_CLASS_DISABLED, blocked, 'Note Detect too old');
+            _vizSetMicButtonState(ui, false, BTN_CLASS_DISABLED, blocked, 'Note Detect too old');
+            ui.btn.setAttribute('aria-disabled', 'true');
             return;
         }
         if (busy) {
@@ -2918,14 +2938,20 @@
     }
 
     /** The reason string shown to the user when mic/scoring must not start,
-     *  or `null` when starting is safe. Names the floor so the message is
-     *  actionable: an upgrade (or disabling Note Detect) is the fix. */
+     *  or `null` when starting is safe. Names the floor, and names the
+     *  upgrade as *the* remedy rather than offering one alongside it:
+     *  note_detect clears its persisted intent only from the branch of its
+     *  toggle that requires it to be enabled, so a peer it cannot keep
+     *  enabled (no MIDI provider for a keys/piano arrangement, or a device
+     *  that would not open) re-arms that intent on every click and cannot be
+     *  cleared from here. "Turn it off" would name a route out that does not
+     *  exist for exactly the peer shape this branch blocks on. */
     function _lkMicCoexistenceBlock() {
         const st = _lkNoteDetectState();
         if (!st || st.supported || st.active === false) return null;
         return 'Microphone feedback is paused: Note Detect ' + _LK_NOTE_DETECT_MIN
             + ' or newer is required to run it alongside Lyrics Karaoke. '
-            + 'Update Note Detect, or turn it off to sing here.';
+            + 'Update Note Detect to sing here.';
     }
 
     function _vizSuppressNoteDetect() {

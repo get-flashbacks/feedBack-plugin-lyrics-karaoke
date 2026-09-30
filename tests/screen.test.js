@@ -1132,7 +1132,10 @@ test('coexistence: a legacy peer that is active blocks the mic with the floor na
         assert.ok(msg, 'an active legacy peer must block');
         assert.ok(msg.includes(screen._LK_NOTE_DETECT_MIN),
             'the message must name the floor so the fix is actionable: ' + msg);
-        assert.match(msg, /update note detect|turn it off/i);
+        assert.match(msg, /update note detect/i,
+            'and name the upgrade, the one remedy that reliably clears the gate');
+        assert.doesNotMatch(msg, /turn it off/i,
+            'note_detect re-arms its persisted intent while it is disabled, so "turn it off" is not a route out');
     } finally {
         removeNoteDetect();
     }
@@ -1239,9 +1242,11 @@ test('coexistence: the manifest floor matches the runtime constant', () => {
 
 test('an older note_detect without the handshake does not break renderer init', async () => {
     // Not a "clean no-op" — since #36 an unprovable legacy peer withholds
-    // the mic. `probes: false` is what makes this fixture that peer: the
-    // default stub's isEnabled() returns false, which would *prove* it idle
-    // and let the mic through. What must still hold either way is that
+    // the mic. `probes: false` is what makes this fixture that peer. Note a
+    // single default `false` no longer proves idleness on its own; both
+    // stubs report `false` here, so this fixture is idle either way — it is
+    // the missing-probe *shape*, not the value, that makes the gate block.
+    // What must still hold either way is that
     // owning/handing back playback and the draw loop are untouched by a peer
     // we cannot suppress.
     installNoteDetect({ omitHandshake: true, probes: false });
