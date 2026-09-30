@@ -1674,6 +1674,7 @@
         // anyway (it is held by a viz panel or about to be), but bail early
         // so the overlay never even requests permission behind its back.
         if (_vizOwnsPlayback()) return;
+        if (_lkMicCoexistenceBlock()) { refreshMicUi(); return; }
         const ok = await _lkMic.start(_lkOverlayOwner);
         if (ok) {
             micWantOnForSong = true;
@@ -1759,9 +1760,24 @@
         // Held by a provider panel — not ours to toggle.
         const busy = shared.ownerId !== null && shared.ownerId !== _lkOverlayOwner.id
             && (shared.state === 'requesting' || shared.state === 'listening' || shared.state === 'suspended');
-        const st = busy ? 'busy' : overlayMicState();
+        const blocked = _lkMicCoexistenceBlock();
+        const st = blocked ? 'blocked' : (busy ? 'busy' : overlayMicState());
         const lastError = st === 'error' ? shared.error : '';
         switch (st) {
+            case 'blocked':
+                // Not `disabled`: a disabled button dispatches no click, so
+                // onMicClick would never reach startMic()'s guard and
+                // nothing would re-read the peer — a latched control with no
+                // route out. Styled disabled and left clickable instead, so
+                // every attempt re-checks the gate (which refuses either way)
+                // and an upgraded peer takes the mic on the next click.
+                micBtn.disabled = false;
+                micBtn.className = BTN_CLASS_DISABLED;
+                micBtn.title = blocked;
+                micBtn.setAttribute('aria-label', blocked);
+                micBtn.setAttribute('aria-pressed', 'false');
+                if (micPill) { micPill.textContent = ''; micPillLastText = ''; }
+                break;
             case 'requesting':
                 micBtn.disabled = true;
                 micBtn.className = BTN_CLASS_DISABLED;
@@ -1803,6 +1819,12 @@
                 }
                 break;
         }
+        // Mirror the rendered state for assistive tech, derived rather than
+        // set per branch: the blocked branch styles the control disabled
+        // while leaving it clickable, so neither the native flag nor a
+        // hand-written attribute per branch can be trusted to stay right
+        // across state changes.
+        micBtn.setAttribute('aria-disabled', (st === 'blocked' || micBtn.disabled) ? 'true' : 'false');
     }
 
     function updateMicPill() {
@@ -2731,15 +2753,32 @@
 
     function _vizSetMicButtonState(ui, disabled, className, title, status) {
         ui.btn.disabled = disabled;
+        // Mirror the native flag for assistive tech, derived here so it can
+        // never go stale; the blocked branch overrides it, because it styles
+        // the control disabled while leaving it clickable.
+        ui.btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
         ui.btn.className = className;
         ui.btn.title = title;
         if (status !== undefined) _vizSetMicStatus(status);
     }
 
-    function _vizApplyMicUiState(ui, snap, ours, busy, target) {
+    function _vizApplyMicUiState(ui, snap, ours, busy, target, blocked) {
         ui.channel.value = snap.channel;
         ui.btn.setAttribute('aria-pressed', ours && snap.state !== 'error' ? 'true' : 'false');
 
+        if (blocked) {
+            // Styled disabled, but NOT natively disabled: a disabled
+            // <button> dispatches no click, so _vizOnMicClick would never
+            // reach requestMic()'s guard and the panel could not recover on
+            // its own. Every click re-checks the gate, which refuses either
+            // way. The status span is 11px inline next to the button (see
+            // _vizBuildMicUi), so it gets a short label; the full reason
+            // stays in title/aria-label, which are hover/AT surfaces. Same
+            // split the neighbouring `busy` branch uses.
+            _vizSetMicButtonState(ui, false, BTN_CLASS_DISABLED, blocked, 'Note Detect too old');
+            ui.btn.setAttribute('aria-disabled', 'true');
+            return;
+        }
         if (busy) {
             _vizSetMicButtonState(ui, true, BTN_CLASS_DISABLED,
                 'The microphone is in use elsewhere', '');
@@ -2788,8 +2827,9 @@
         const busy = !ours && snap.ownerId !== null
             && (snap.state === 'requesting' || snap.state === 'listening' || snap.state === 'suspended');
         const target = _vizMicTarget();
+        const blocked = _lkMicCoexistenceBlock();
         _vizPopulateMicTargets();
-        _vizApplyMicUiState(ui, snap, ours, busy, target);
+        _vizApplyMicUiState(ui, snap, ours, busy, target, blocked);
         ui.btn.setAttribute('aria-label', ui.btn.title);
     }
 
@@ -2834,6 +2874,86 @@
      *  the whole app, not just about this plugin's own legacy overlay.
      *
      *  Entirely feature-detected: no note_detect installed → no-op. */
+    /** Lowest Note Detect release with the full ownership handshake
+     *  (`setDefaultSuppressed` + `wantsDetect()` + `isEnabled()`):
+     *  got-feedBack/feedBack-plugin-notedetect's first auditable snapshot
+     *  (7d237ff278, 1.15.2, 2026-06-16) already carries all three, and every
+     *  later commit keeps them. The runtime cannot compare versions — the
+     *  host exposes no version global and no plugin registry — so this
+     *  constant is documentation plus a test-pinned manifest value, and the
+     *  actual gate is the capability check in _lkNoteDetectState(). */
+    const _LK_NOTE_DETECT_MIN = '1.15.2';
+
+    /** Classify the installed Note Detect peer for mic-ownership purposes.
+     *
+     *  `null`                       — no Note Detect at all; it stays
+     *                                 optional and never blocks.
+     *  `{supported: true}`           — handshake present (>= 1.15.2): we can
+     *                                 suppress and restore it, mic allowed.
+     *  `{supported: false, active}` — legacy build. `active: false` means
+     *                                 every probe it exposes reports `false`,
+     *                                 so it is idle and not armed to take
+     *                                 the mic; `true`/`undefined` means it may
+     *                                 own the microphone, so we refuse.
+     *
+     *  The two probes are NOT interchangeable and must not be
+     *  short-circuited against each other. In note_detect `isEnabled()` is
+     *  the live toggle while `wantsDetect()` is the persisted *intent*
+     *  (`let detectPreference = true` on a default install), and the peer
+     *  resolves that intent itself at the next song boundary — it calls
+     *  `enable()` whenever `wantsDetect() && !isEnabled()`. So
+     *  `isEnabled() === false` is exactly the pre-auto-enable state, not
+     *  proof of idleness: trusting it first would let karaoke take the mic on
+     *  a default-install legacy peer and be ambushed one song later, which
+     *  is the collision this whole path exists to prevent. Hence: every
+     *  probe is read independently, and the peer is idle only when all of
+     *  them say `false`. This matches how _vizSuppressNoteDetect() reads
+     *  the same signal, and only ever makes the gate stricter.
+     *
+     *  Evaluated on every start attempt rather than cached, so upgrading the
+     *  peer mid-session unblocks without a reload. Each probe is its own
+     *  try/catch: a throwing peer must not break init, and a throw counts as
+     *  "unprovable" (the safe direction), never as a `false`. */
+    function _lkNoteDetectState() {
+        const factory = typeof window === 'undefined' ? null : window.createNoteDetector;
+        if (!factory) return null;
+        if (typeof factory.setDefaultSuppressed === 'function') {
+            return { supported: true };
+        }
+        const singleton = window.noteDetect;
+        let sawProbe = false;
+        let wants = false;
+        let enabled = false;
+        let unprovable = false;
+        if (singleton && typeof singleton.isEnabled === 'function') {
+            sawProbe = true;
+            try { enabled = !!singleton.isEnabled(); } catch (_) { unprovable = true; }
+        }
+        if (singleton && typeof singleton.wantsDetect === 'function') {
+            sawProbe = true;
+            try { wants = !!singleton.wantsDetect(); } catch (_) { unprovable = true; }
+        }
+        if (!sawProbe || unprovable) return { supported: false, active: undefined };
+        return { supported: false, active: wants || enabled };
+    }
+
+    /** The reason string shown to the user when mic/scoring must not start,
+     *  or `null` when starting is safe. Names the floor, and names the
+     *  upgrade as *the* remedy rather than offering one alongside it:
+     *  note_detect clears its persisted intent only from the branch of its
+     *  toggle that requires it to be enabled, so a peer it cannot keep
+     *  enabled (no MIDI provider for a keys/piano arrangement, or a device
+     *  that would not open) re-arms that intent on every click and cannot be
+     *  cleared from here. "Turn it off" would name a route out that does not
+     *  exist for exactly the peer shape this branch blocks on. */
+    function _lkMicCoexistenceBlock() {
+        const st = _lkNoteDetectState();
+        if (!st || st.supported || st.active === false) return null;
+        return 'Microphone feedback is paused: Note Detect ' + _LK_NOTE_DETECT_MIN
+            + ' or newer is required to run it alongside Lyrics Karaoke. '
+            + 'Update Note Detect to sing here.';
+    }
+
     function _vizSuppressNoteDetect() {
         const factory = window.createNoteDetector;
         if (!factory || typeof factory.setDefaultSuppressed !== 'function') return;
@@ -4327,6 +4447,13 @@
             /** Explicit-action entry point: callers wire this to a click. */
             requestMic() {
                 if (!this.canScore()) return Promise.resolve(false);
+                // Refuse the claim, not the playback: a false canScore()
+                // would empty _vizMicCandidates() and the 🎤 would vanish,
+                // leaving the user no way to learn why.
+                if (_lkMicCoexistenceBlock()) {
+                    _vizRefreshMicUi();
+                    return Promise.resolve(false);
+                }
                 const p = _lkMic.start(micOwner);
                 _vizRefreshMicUi();
                 return p.then((ok) => { _vizRefreshMicUi(); return ok; });
@@ -4455,6 +4582,26 @@
             _lkCreateMicController,
             _lkMic,
             _lkOverlayOwner,
+            // #36 Note Detect coexistence floor
+            _LK_NOTE_DETECT_MIN,
+            _lkNoteDetectState,
+            _lkMicCoexistenceBlock,
+            // #36: the legacy overlay's mic button is only ever built by
+            // ensureToggleButton() from a real #btn-lyrics host element,
+            // so without this seam none of refreshMicUi()'s states —
+            // including the new 'blocked' one — can be exercised at all.
+            _lkOverlayUi: {
+                ensureToggleButton,
+                onSongLoaded,
+                refreshButtonState,
+                refreshMicUi,
+                // The overlay's getUserMedia entry point. Reachable in
+                // production through the 🎤 click; the auto-start branch
+                // needs micWantOnForSong, which only a *successful* start
+                // ever sets, so a peer that blocks every start can never
+                // make that precondition true and the toggle can't cover it.
+                startMic,
+            },
             _vizOnMicClick,
             _vizMicTarget,
             _vizSelectMicTarget,
