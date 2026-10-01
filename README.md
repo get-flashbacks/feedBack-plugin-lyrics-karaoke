@@ -44,10 +44,10 @@ resolving outside the song library, and the plugin never joins a requested
 filename onto the library directory unchecked — if a host somehow ships
 neither helper, song resolution refuses rather than guessing. The two differ
 on names that stay *inside* the library: the newer helper also refuses
-drive-absolute and NUL-containing names outright, and it deliberately allows a
-library reached through a symlink or junction, which the older one does not.
-A junction-mounted library on such a host is the one case that 404s; updating
-the host fixes it.
+drive-absolute and NUL-containing names outright, and it deliberately keeps a
+song entry that is a symlink pointing out of the library, which the older one
+follows and then refuses. Both resolve the library root itself first, so a
+library mounted through a symlink or junction resolves on either host.
 
 Per-player identity is a separate, optional capability. Scoping karaoke to the
 active player needs the host's `player-identity` capability
@@ -137,7 +137,7 @@ back to a compatible Lyrics Karaoke release.
 | Symptom | Check |
 | --- | --- |
 | No highway | Use FeedBack 0.3.0-alpha.1 or later, a Vocals arrangement, and Auto or Lyrics Karaoke visualization. |
-| Song does not resolve on an old host | A library reached through a symlink or junction is refused by the pre-`0dcc913` fallback; update the host. |
+| Song does not resolve on an old host | A song pack that is a symlink pointing outside the library is refused by the pre-`0dcc913` fallback; update the host. |
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Enable Microphone feedback, click 🎤, grant browser permission, and select a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |

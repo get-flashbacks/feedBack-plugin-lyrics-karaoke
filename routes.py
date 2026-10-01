@@ -463,25 +463,26 @@ def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
 
     * Current core ships ``dlc_paths._resolve_dlc_path`` — the shared
       containment helper, added in feedBack commit ``0dcc913`` and extracted
-      from ``server.py``. Containment is LEXICAL, so a song library mounted
-      through a directory junction / symlink still resolves.
+      from ``server.py``. It normalizes ``.``/``..`` LEXICALLY, so it does not
+      follow a song entry that is a symlink pointing out of the library.
     * Core ``0.3.0-alpha.1`` (this manifest's ``minHost``) has no
       ``dlc_paths``; back then ``server._resolve_dlc_path`` was literally
       ``return safe_join(dlc, filename)``, and ``lib/safepath.safe_join``
       was already present. So the fallback delegates to ``safe_join`` — the
       same containment that host applied to its own filename-bound routes.
 
-    The two are NOT ordered by strictness. Both refuse anything that resolves
-    outside ``dlc``, which is the property this call site depends on. They
-    differ only on names that stay inside it: ``dlc_paths`` also refuses
-    drive-absolute (``C:/x``) and NUL-containing names outright, which
-    ``safe_join`` refuses only insofar as ``resolve()`` rejects them; and
-    ``safe_join`` resolves symlinks before checking, so it refuses an
-    in-library junction that ``dlc_paths`` deliberately allows. Hosts in the
-    window between the alpha.1 tag and ``0dcc913`` already had the lexical
-    helper — in ``server.py``, before the extraction — so there the fallback
-    is the stricter of the two and a junction-mounted library 404s until the
-    host is updated. See
+    Both resolve the ROOT before testing containment, so a library reached
+    through a directory junction or symlink resolves on either shape. Neither
+    can be handed a filename that names a path outside the library, which is
+    the property this call site depends on — but the two are NOT otherwise
+    ordered by strictness. They differ only on names that stay inside it:
+    ``dlc_paths`` also refuses drive-absolute (``C:/x``) and NUL-containing
+    names outright, which ``safe_join`` refuses only insofar as ``resolve()``
+    rejects them; and it normalizes purely lexically, so it keeps a song entry
+    that is a symlink pointing out of the library, where ``safe_join`` follows
+    the link and refuses. That last case is the only one the fallback is
+    stricter on, and it errs towards refusing, never towards a path outside the
+    library. See
     ``docs/architecture/vocals-visualization-integration.md`` ("Minimum
     FeedBack version") for the full matrix and for how this floor stays
     separate from the optional per-player identity capability.
@@ -502,8 +503,10 @@ def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
         # No ``dlc_paths``: the pre-``0dcc913`` host, or a partial install
         # whose ``dlc_paths`` failed on its own ``appstate`` import. Both land
         # on ``safe_join``, core's containment helper in that release. Debug,
-        # not warning: this runs per request, and the user-visible symptom of
-        # the stricter fallback is a 404 the caller already handles.
+        # not warning: this runs per request, and the only user-visible
+        # difference is the fallback's extra refusal of an out-of-library
+        # symlinked song entry, which the caller reports as a 404 it already
+        # handles.
         try:
             from safepath import safe_join
         except ImportError:

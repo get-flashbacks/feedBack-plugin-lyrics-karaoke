@@ -166,33 +166,35 @@ byte-identical to the parent), and that commit landed after the
 `v0.3.0-alpha.1` tag. So `routes.py` does not raise the floor; it delegates to
 whichever helper the host ships, in this order:
 
-1. `dlc_paths._resolve_dlc_path` — current core. Containment is *lexical*, so a
-   library reached through a directory junction or symlink still resolves.
+1. `dlc_paths._resolve_dlc_path` — current core. Containment is *lexical*, so
+   it does not follow a symlinked song entry out of the library.
 2. `safepath.safe_join` — the pre-`0dcc913` host, where `server._resolve_dlc_path`
-   was literally `return safe_join(dlc, filename)`. Containment resolves
-   symlinks first.
+   was literally `return safe_join(dlc, filename)`. It resolves the candidate
+   before testing containment. Both resolve the *root* first, so a library
+   reached through a directory junction or symlink resolves either way.
 3. Neither importable → refuse (return "song not found"). There is deliberately
    no third fallback; a host that lost both core helpers degrades to the 404 the
    caller already handles rather than to an unchecked join.
 
 **The two helpers are not ordered by strictness**, and the plugin does not
-paper over the difference. Both refuse anything that resolves outside `dlc`,
-which is the property the call site depends on. They differ only on names that
-stay inside it:
+paper over the difference. Neither can be handed a filename that names a path
+outside the library, which is the property the call site depends on. They
+differ only on names that stay inside it:
 
 | | `dlc_paths` (current) | `safe_join` (pre-`0dcc913`) |
 | --- | --- | --- |
 | `..` traversal, absolute POSIX path | refuse | refuse |
 | `C:/x` drive-absolute | refuse (`PureWindowsPath(...).drive`) | contained path under `dlc` on POSIX; refused on Windows |
 | embedded NUL | refuse explicitly | refused only insofar as `resolve()` raises |
-| in-library symlink / junction | allowed (deliberate: `dlc_paths`' docstring calls rejecting it the cause of "broken covers, unplayable songs") | refused (it resolves the link first) |
+| song entry that is a symlink pointing out of the library | allowed (core picked lexical containment deliberately, so a symlinked pack stays reachable) | refused (it resolves the link first) |
 
-So the last row is the one behavioural regression of the fallback: a host in
+So the last row is the one behavioural difference of the fallback: a host in
 the window between the alpha.1 tag and `0dcc913` already had the *lexical*
 helper — in `server.py`, before the extraction — and there the plugin's
-fallback is the stricter of the two, so a junction-mounted library 404s until
-the host is updated. The reverse is not a security exposure: the looser
-`safe_join` still cannot produce a path outside the library root.
+fallback refuses a symlinked song pack that the current helper would resolve.
+That direction is the safe one — a refusal, not a path outside the root — and
+it does not touch the common setup of a library mounted through a junction or
+symlink, which both helpers resolve.
 
 The plugin never re-implements containment, so the check cannot drift from the
 one core applies to its own filename-bound routes. `tests/test_host_compat.py`

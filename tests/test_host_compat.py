@@ -89,6 +89,19 @@ def _write_pack(root: Path, name: str) -> Path:
     return pack
 
 
+def _link_at(link: Path, target: Path) -> Path:
+    """Point ``link`` at ``target``, skipping the test if the host forbids it.
+
+    Windows without developer mode refuses `os.symlink`; the containment
+    behaviour under test is unchanged, only the fixture is unavailable.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable on this host: {exc}")
+    return link
+
+
 def _wire_host(monkeypatch, tmp_path, log_name="test.host_compat"):
     _simulate_sloppak(monkeypatch)
     # setup() assigns the module globals directly, so snapshot them through
@@ -121,9 +134,9 @@ def test_current_host_uses_dlc_paths_helper(tmp_path, monkeypatch):
 
 
 def test_current_host_verdict_is_taken_as_is(tmp_path, monkeypatch):
-    # The new helper's containment is LEXICAL, so a junction-mounted library
-    # still resolves; the plugin must not second-guess a refusal it does not
-    # understand.
+    # The new helper's containment is LEXICAL, so it keeps a song entry that is
+    # a symlink inside the library; the plugin must not second-guess a refusal
+    # it does not understand.
     _simulate_current_host(monkeypatch, lambda dlc, filename: None)
     assert routes._resolve_dlc_path(tmp_path, "song.sloppak") is None
 
@@ -133,6 +146,44 @@ def test_legacy_host_falls_back_to_core_safe_join(tmp_path, monkeypatch):
     # `safe_join` resolves, so compare resolved — a symlinked tmp root (macOS
     # `/var` -> `/private/var`) would otherwise fail this on a dev machine.
     assert routes._resolve_dlc_path(tmp_path, "song.sloppak") == (tmp_path / "song.sloppak").resolve()
+
+
+def test_legacy_host_resolves_a_symlinked_library_root(tmp_path, monkeypatch):
+    """A junction-mounted library is NOT the fallback's regression.
+
+    `safe_join` resolves the ROOT before testing containment, so a library
+    reached through a symlink resolves and every song inside it still contains.
+    Pinning this is what keeps the docs from claiming a junction-mounted
+    library 404s on an old host, which it does not.
+    """
+    _simulate_legacy_host(monkeypatch)
+    real_root = tmp_path / "real-library"
+    real_root.mkdir()
+    _write_pack(real_root, "song.sloppak")
+    linked_root = _link_at(tmp_path / "linked-library", real_root)
+
+    resolved = routes._resolve_dlc_path(linked_root, "song.sloppak")
+
+    assert resolved == (real_root / "song.sloppak").resolve()
+    assert resolved.is_relative_to(real_root.resolve())
+
+
+def test_legacy_host_refuses_a_song_entry_symlinked_out_of_the_library(tmp_path, monkeypatch):
+    """The one name class the fallback is stricter on, and it is a refusal.
+
+    `safe_join` follows the link before testing containment, so a song entry
+    pointing out of the library comes back as `None`; current core's lexical
+    check keeps it. Erring towards refusing is the safe direction.
+    """
+    _simulate_legacy_host(monkeypatch)
+    library = tmp_path / "library"
+    library.mkdir()
+    outside_root = tmp_path / "elsewhere"
+    outside_root.mkdir()
+    outside = _write_pack(outside_root, "song.sloppak")
+    _link_at(library / "song.sloppak", outside)
+
+    assert routes._resolve_dlc_path(library, "song.sloppak") is None
 
 
 @pytest.mark.parametrize("filename", [
