@@ -455,6 +455,72 @@ def _job_lock_for(filename: str) -> threading.Lock:
         return lock
 
 
+def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
+    """Contain ``filename`` under DLC_DIR using whichever core helper exists.
+
+    Two core shapes matter here, and both helpers live in the host's ``lib/``
+    directory (already on the plugin's import path, alongside ``sloppak``):
+
+    * Current core ships ``dlc_paths._resolve_dlc_path`` — the shared
+      containment helper, added in feedBack commit ``0dcc913`` and extracted
+      from ``server.py``. It normalizes ``.``/``..`` LEXICALLY, so it does not
+      follow a song entry that is a symlink pointing out of the library.
+    * Core ``0.3.0-alpha.1`` (this manifest's ``minHost``) has no
+      ``dlc_paths``; back then ``server._resolve_dlc_path`` was literally
+      ``return safe_join(dlc, filename)``, and ``lib/safepath.safe_join``
+      was already present. So the fallback delegates to ``safe_join`` — the
+      same containment that host applied to its own filename-bound routes.
+
+    Both resolve the ROOT before testing containment, so a library reached
+    through a directory junction or symlink resolves on either shape. Neither
+    can be handed a filename that names a path outside the library, which is
+    the property this call site depends on — but the two are NOT otherwise
+    ordered by strictness. They differ only on names that stay inside it:
+    ``dlc_paths`` also refuses drive-absolute (``C:/x``) and NUL-containing
+    names outright, which ``safe_join`` refuses only insofar as ``resolve()``
+    rejects them; and it normalizes purely lexically, so it keeps a song entry
+    that is a symlink pointing out of the library, where ``safe_join`` follows
+    the link and refuses. That last case is the only one the fallback is
+    stricter on, and it errs towards refusing, never towards a path outside the
+    library. See
+    ``docs/architecture/vocals-visualization-integration.md`` ("Minimum
+    FeedBack version") for the full matrix and for how this floor stays
+    separate from the optional per-player identity capability.
+
+    The plugin deliberately does not re-implement containment: it delegates to
+    core on both host shapes, so the check can never drift from the one core
+    applies to its own filename-bound routes.
+
+    Returns ``None`` — never an unguarded join — when neither helper is
+    importable, so a host that lost both degrades to "song not found"
+    (the 404 the caller already handles) rather than to an
+    arbitrary-file read, and, since ``dlc_path`` is also the re-zip WRITE
+    target (``_rezip_sloppak``), an arbitrary-file overwrite.
+    """
+    try:
+        from dlc_paths import _resolve_dlc_path as core_resolve
+    except ImportError:
+        # No ``dlc_paths``: the pre-``0dcc913`` host, or a partial install
+        # whose ``dlc_paths`` failed on its own ``appstate`` import. Both land
+        # on ``safe_join``, core's containment helper in that release. Debug,
+        # not warning: this runs per request, and the only user-visible
+        # difference is the fallback's extra refusal of an out-of-library
+        # symlinked song entry, which the caller reports as a 404 it already
+        # handles.
+        try:
+            from safepath import safe_join
+        except ImportError:
+            _log.warning(
+                "No core DLC containment helper available "
+                "(neither dlc_paths nor safepath); refusing to resolve %r",
+                filename,
+            )
+            return None
+        _log.debug("No dlc_paths on this host; containing DLC paths with safepath.safe_join")
+        return safe_join(dlc, filename)
+    return core_resolve(dlc, filename)
+
+
 def _resolve_sloppak(filename: str):
     """Resolve a sloppak filename to its source dir, manifest, and zip flag.
 
@@ -462,7 +528,6 @@ def _resolve_sloppak(filename: str):
     target is missing or isn't a sloppak.
     """
     import sloppak as sloppak_mod
-    from dlc_paths import _resolve_dlc_path
 
     if not filename:
         return None

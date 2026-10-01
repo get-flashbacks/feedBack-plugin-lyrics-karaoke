@@ -24,10 +24,52 @@ a community-maintained fork, not an official got-feedBack release.
 
 Install this plugin in FeedBack's plugin directory and enable it in the host.
 The highway visualization requires FeedBack **0.3.0-alpha.1 or later**. Older
-hosts continue to use the legacy karaoke overlay. The preparation screen also
-needs the host's song library and, for alignment, a configured alignment
-server. Pitch generation uses the plugin's Python audio dependencies in
-`requirements.txt`.
+hosts continue to use the legacy karaoke overlay.
+
+### Core compatibility
+
+`plugin.json` declares `minHost: 0.3.0-alpha.1`, the release whose
+`setRenderer` lifecycle this plugin's renderer is built on. The backend needs
+one core helper beyond that: the shared DLC containment helper in
+`lib/dlc_paths.py`, first shipped in feedBack commit
+[`0dcc913`](https://github.com/got-feedBack/feedBack/commit/0dcc913). No core
+release represents that commit yet, so `plugin.json` pins the commit under
+`host_requirements.backend` until one does.
+
+Hosts older than `0dcc913` are supported rather than blocked: `routes.py` falls
+back to `lib/safepath.py` `safe_join`, which is exactly what the host's own
+`_resolve_dlc_path` was before the extraction. Preparation routes and
+`/playback` therefore work from `minHost` upward. Both helpers refuse anything
+resolving outside the song library, and the plugin never joins a requested
+filename onto the library directory unchecked — if a host somehow ships
+neither helper, song resolution refuses rather than guessing. The two differ
+on names that stay *inside* the library: the newer helper also refuses
+drive-absolute and NUL-containing names outright, and it deliberately keeps a
+song entry that is a symlink pointing out of the library, which the older one
+follows and then refuses. Both resolve the library root itself first, so a
+library mounted through a symlink or junction resolves on either host.
+
+Per-player identity is a separate, optional capability. Scoping karaoke to the
+active player needs the host's `player-identity` capability
+(`window.feedBack.playerContexts`), which arrived after `0.3.0-alpha.1`. Hosts
+without it still prepare lyrics and pitch, render the highway, and score the
+microphone; only the voice role attached to the active player is skipped.
+
+### Prerequisites that are not core compatibility
+
+These are separate from the host version above — a fully current host still
+needs them:
+
+- **Microphone and browser.** Scoring needs a browser that supports
+  `getUserMedia`, plus permission for the selected device or channel. Playback
+  without scoring needs no microphone at all.
+- **Alignment.** Building lyrics needs a configured alignment service (see the
+  host's Stems / Lyrics Sync settings). Alignment is optional if a pack already
+  carries `lyrics.json`.
+- **Pitch.** Generating pitch uses the plugin's own Python audio dependencies in
+  `requirements.txt`. It prefers a configured CREPE-backed `/pitch` server and
+  falls back to local pYIN, so a song can be prepared with no remote service.
+  Packs that already carry `vocal_pitch.json` need neither.
 
 **Note Detect 1.15.2 or newer is required to run the two together.** Note
 Detect remains optional: Lyrics Karaoke works fully on its own. That floor is
@@ -95,6 +137,7 @@ back to a compatible Lyrics Karaoke release.
 | Symptom | Check |
 | --- | --- |
 | No highway | Use FeedBack 0.3.0-alpha.1 or later, a Vocals arrangement, and Auto or Lyrics Karaoke visualization. |
+| Song does not resolve on an old host | A song pack that is a symlink pointing outside the library is refused by the pre-`0dcc913` fallback; update the host. |
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Enable Microphone feedback, click 🎤, grant browser permission, and select a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
