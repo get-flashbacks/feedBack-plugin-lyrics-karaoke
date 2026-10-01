@@ -150,6 +150,93 @@ settings (`applySetting`/`getSetting`, feedBack#849), and the
 unconditionally — there is no partial-feature degradation path, since the
 renderer cannot register at all without `setRenderer`.
 
+### The backend floor is a different, later commit (#35)
+
+`minHost` describes the *renderer* contract. The backend has one extra
+dependency that `minHost` does not cover: `routes._resolve_sloppak` resolves a
+request-supplied `filename` inside `DLC_DIR`, so it has to use core's shared
+containment helper rather than a bare `dlc / filename` join — that path is
+also the re-zip **write** target (`_rezip_sloppak`), so an unguarded join would
+be an arbitrary-file-overwrite primitive, not just a read.
+
+Core's shared helper lives in `lib/dlc_paths.py`
+([`0dcc913`](https://github.com/got-feedBack/feedBack/commit/0dcc913), extracted
+from `server.py` — the commit states the function moved "verbatim", so it was
+byte-identical to the parent), and that commit landed after the
+`v0.3.0-alpha.1` tag. So `routes.py` does not raise the floor; it delegates to
+whichever helper the host ships, in this order:
+
+1. `dlc_paths._resolve_dlc_path` — current core. Containment is *lexical*, so a
+   library reached through a directory junction or symlink still resolves.
+2. `safepath.safe_join` — the pre-`0dcc913` host, where `server._resolve_dlc_path`
+   was literally `return safe_join(dlc, filename)`. Containment resolves
+   symlinks first.
+3. Neither importable → refuse (return "song not found"). There is deliberately
+   no third fallback; a host that lost both core helpers degrades to the 404 the
+   caller already handles rather than to an unchecked join.
+
+**The two helpers are not ordered by strictness**, and the plugin does not
+paper over the difference. Both refuse anything that resolves outside `dlc`,
+which is the property the call site depends on. They differ only on names that
+stay inside it:
+
+| | `dlc_paths` (current) | `safe_join` (pre-`0dcc913`) |
+| --- | --- | --- |
+| `..` traversal, absolute POSIX path | refuse | refuse |
+| `C:/x` drive-absolute | refuse (`PureWindowsPath(...).drive`) | contained path under `dlc` on POSIX; refused on Windows |
+| embedded NUL | refuse explicitly | refused only insofar as `resolve()` raises |
+| in-library symlink / junction | allowed (deliberate: `dlc_paths`' docstring calls rejecting it the cause of "broken covers, unplayable songs") | refused (it resolves the link first) |
+
+So the last row is the one behavioural regression of the fallback: a host in
+the window between the alpha.1 tag and `0dcc913` already had the *lexical*
+helper — in `server.py`, before the extraction — and there the plugin's
+fallback is the stricter of the two, so a junction-mounted library 404s until
+the host is updated. The reverse is not a security exposure: the looser
+`safe_join` still cannot produce a path outside the library root.
+
+The plugin never re-implements containment, so the check cannot drift from the
+one core applies to its own filename-bound routes. `tests/test_host_compat.py`
+simulates all three host shapes.
+
+Because no core *release* represents `0dcc913`, `plugin.json` pins the commit
+under `host_requirements.backend` (an additive extension key; hosts ignore keys
+they do not recognise) and `minHost` stays at `0.3.0-alpha.1`.
+
+### Preparation/playback vs. per-player identity
+
+Two different support questions, deliberately not merged:
+
+- **Preparation and playback** — every route that resolves a song goes through
+  the one `_resolve_sloppak` seam, so the adapter covers all of them:
+  `/status`, `/data`, `/playback`, `/align`, `/save-lyrics`,
+  `/generate-pitch`, plus the renderer that reads `/playback`. They work from
+  `minHost` upward on both host shapes. (`/export` never touches the library —
+  it formats the segments it is handed — and `/server-status` only reads
+  `config.json`.)
+- **Per-player identity** is *optional* and arrived after `minHost`.
+  `updateKaraokePlayerContext` scopes a practice mode to
+  `window.feedBack.playerContexts`, published by the host's
+  `player-identity` capability (`static/capabilities/player-identity.js`, which
+  is not in the `v0.3.0-alpha.1` tree). The call already no-ops when the host
+  API is missing, so an older host keeps preparation, rendering, and microphone
+  scoring; only the voice role attached to the active player is skipped.
+  Recorded as `host_requirements.player_identity.optional` in `plugin.json`.
+
+Per-player identity is a *core capability*, not a peer plugin, so it does not
+belong in `peer_requirements` (which is about Note Detect).
+
+### Still open
+
+- #17 owns the runtime matrix: exercising the status/data/playback and
+  save/generate routes against a real host at the declared minimum. The tests
+  here simulate both host shapes at the seam; they are not a substitute for
+  that run — in particular no test here drives a real alignment or pitch
+  extraction, so it cannot speak to those. The known multi-voice save bugs are
+  plugin defects, and no host version resolves them.
+- Microphone/browser support and the local-vs-remote pitch and alignment
+  prerequisites are listed in the README separately from core compatibility —
+  they are runtime prerequisites, not host-version facts.
+
 ## Manifest scope: one plugin, two roles
 
 A single `plugin.json` **may** declare both a `nav`/`screen` entry (the
