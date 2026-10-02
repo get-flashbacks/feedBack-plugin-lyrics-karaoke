@@ -33,6 +33,10 @@ and the repository's tagged history.
   renderer from `window.feedBackViz_lyrics_karaoke` (legacy
   `window.slopsmithViz_lyrics_karaoke` alias retained). The rest of #32
   re-homes it behind the Karaoke button.
+- **Not for a standalone release.** 1.13.0 on its own is the step that removes
+  the highway renderer from the main player, so ship it with the rest of
+  [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
+  or mark it pre-release.
 - The renderer is otherwise unchanged: same lifecycle, ownership handshake,
   and `/playback` contract. Per core's plugin contract `type` only ever
   controlled discovery, so nothing else had to move.
@@ -42,9 +46,11 @@ and the repository's tagged history.
   so it renders no controls for them and splitscreen shows no Viz ⚙ popover.
   Where a renderer is installed it keeps running on `VIZ_SETTING_DEFAULTS`,
   with **Pitch tolerance**, **Octave-free pitch match**, and **Mic timing
-  offset** still taking the engine preferences. No previously saved value is
-  lost: splitscreen only persisted overrides for controls the manifest
-  declared.
+  offset** still taking the engine preferences. Splitscreen both reads and
+  writes a panel's overrides only for controls the manifest declares, so it
+  stops re-applying what it saved before this change; those
+  `splitscreenVizSetting:lyrics_karaoke:…` keys stay in `localStorage` unread,
+  and take effect again only if a later release re-declares these controls.
 
 ### Fixed
 
