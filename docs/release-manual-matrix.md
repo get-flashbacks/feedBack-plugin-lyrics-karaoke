@@ -22,12 +22,27 @@ existing prepared pack from before this release without regenerating it.
 
 Mark each row Pass, Fail, or Blocked for each host version and link evidence.
 
+Rows below that exercise the **highway renderer** — `Interface`, `Disconnect`,
+`Duet`, `Single panel`, `Mixed split`, `Two vocals panels`, `Layout` — have no
+reachable entry point since
+[#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44)
+dropped `type: "visualization"`. Core's viz picker, core's Auto mode, and
+splitscreen's per-panel dropdown all filter `/api/plugins` candidates on that
+field, so none of them can offer it any more. (`Default mic`, `No mic`, and
+`Denied mic` stay reachable — the Karaoke button's overlay has its own 🎤.)
+Mark the rest Blocked with the #44 reference until the remainder of
+[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
+re-homes the renderer behind the Karaoke button. The two rows below are the
+only routes left into the renderer, and they both go through splitscreen's
+`feedBackViz_` / `slopsmithViz_` prefix probe rather than discovery.
+
 | Area | Action and expected result | Minimum | Latest | Evidence / issue |
 | --- | --- | --- | --- | --- |
 | Preparation | Align/save, generate pitch, export LRC, reopen pack; data persists. | | | |
 | Migration | Open an existing prepared pack without regeneration; lyrics and optional pitch load. | | | |
-| Selection | Open Vocals in Auto mode; one highway renders and no overlay or competing scorer appears. | | | |
-| Fallback | Disable provider or select another renderer; overlay works; prepared files are unchanged. | | | |
+| Selection | Visualization picker, Auto, and splitscreen's per-panel dropdown have no Lyrics Karaoke entry; the **Karaoke** button still runs the overlay. | | | |
+| Saved panel pref | In a splitscreen panel saved before #44, pick this plugin as the visualization, then reopen the panel; `splitscreenPanelPrefs[].arrName` is `__viz__:lyrics_karaoke:<arrangement name>` and the renderer still installs. Prepared files are unchanged. | | | |
+| Registry-fetch fallback | With `/api/plugins` unreachable, splitscreen's window rescan still lists the plugin and a fresh pick installs the renderer. | | | |
 | No mic | Load and play without clicking 🎤; browser requests no microphone. | | | |
 | Denied mic | Deny permission; lyrics continue, one actionable error appears, no retry loop. | | | |
 | Default mic | Click 🎤 and sing; trace and score update; stop releases the track. | | | |

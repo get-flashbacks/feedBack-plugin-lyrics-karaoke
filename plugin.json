@@ -1,7 +1,7 @@
 {
   "id": "lyrics_karaoke",
   "name": "Lyrics Karaoke",
-  "version": "1.12.9",
+  "version": "1.13.0",
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"
@@ -18,80 +18,6 @@
       "compatibility": "none",
       "safety": "safe",
       "description": "Scopes karaoke and vocal-pitch practice to the active player's voice role."
-    },
-    "visualization": {
-      "roles": [
-        "provider"
-      ],
-      "operations": [
-        "renderer.create",
-        "renderer.destroy"
-      ],
-      "emits": [
-        "renderer-ready",
-        "renderer-failed"
-      ],
-      "mode": "active",
-      "compatibility": "degrade-noop",
-      "ownership": "multi-provider",
-      "safety": "safe",
-      "version": 1,
-      "description": "Renders synced lyrics and vocal pitch as a highway visualization for Vocals arrangements, from the canonical /playback payload.",
-      "settings": [
-        {
-          "key": "micFeedback",
-          "label": "Microphone feedback",
-          "type": "toggle",
-          "default": true
-        },
-        {
-          "key": "octaveIndependent",
-          "label": "Octave-free pitch match",
-          "type": "toggle",
-          "default": false
-        },
-        {
-          "key": "tolerance",
-          "label": "Pitch tolerance (semitones)",
-          "type": "range",
-          "default": 1,
-          "min": 0.5,
-          "max": 2,
-          "step": 0.25
-        },
-        {
-          "key": "micOffsetMs",
-          "label": "Mic timing offset (ms)",
-          "type": "range",
-          "default": 0,
-          "min": -1000,
-          "max": 1000,
-          "step": 5
-        },
-        {
-          "key": "sungPart",
-          "label": "Sung part",
-          "type": "select",
-          "default": "primary",
-          "options": [
-            { "id": "primary", "label": "Primary" },
-            { "id": "part2", "label": "Part 2" },
-            { "id": "part3", "label": "Part 3" },
-            { "id": "part4", "label": "Part 4" }
-          ]
-        },
-        {
-          "key": "leftRailMode",
-          "label": "Left rail",
-          "type": "select",
-          "default": "absolute",
-          "options": [
-            { "id": "absolute", "label": "Absolute tuner" },
-            { "id": "technique", "label": "Voice technique" },
-            { "id": "off", "label": "Off" }
-          ]
-        }
-      ]
     },
     "audio-input": {
       "roles": [
@@ -119,7 +45,6 @@
   "category": "practice",
   "description": "Karaoke-style synced lyrics during playback.",
   "icon": "assets/thumb.svg",
-  "type": "visualization",
   "minHost": "0.3.0-alpha.1",
   "host_requirements": {
     "_note": "Extension key, not yet ratified by the plugin spec. Hosts MUST ignore manifest keys they do not recognise, so this is additive and inert today.",
