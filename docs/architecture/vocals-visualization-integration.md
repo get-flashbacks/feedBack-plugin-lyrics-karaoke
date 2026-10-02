@@ -3,6 +3,20 @@
 Status: **Accepted** — resolves [#10](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/10),
 part of epic [#18](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/18).
 
+> **Superseded in part by [#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44)**
+> (first sub-issue of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)):
+> the renderer no longer declares `type: "visualization"`, and every viz list
+> built from `/api/plugins` filters on `type`, so it leaves core's viz picker,
+> core's Auto mode, and splitscreen's per-panel dropdown on that path. The renderer,
+> its lifecycle, ownership model, and payload contract are unchanged —
+> `window.feedBackViz_lyrics_karaoke` (plus the legacy
+> `window.slopsmithViz_lyrics_karaoke` alias) remains the whole install
+> contract, so a consumer that resolves the id by prefix still gets a working
+> renderer.
+> Sections that described the picker/Auto path are marked below; the rest of
+> #32 re-homes selection into the karaoke UI and is where the presentation
+> decisions land.
+
 This document defines the boundary between Lyrics Karaoke's existing
 preparation pipeline and a new FeedBack visualization provider derived from
 [Karaoke Highway](https://github.com/Taynavv/feedback-vocals-viz), before any
@@ -67,8 +81,11 @@ Multi-voice is *rendered* here (scored voice as slabs, the rest as
 secondary flat guide bars on one shared axis). `/playback` translates
 `vocal_tracks[]` into the canonical `voices[]` payload; `screen.js` stays
 transport-only and never reads manifest extensions itself.
-- Auto-selects for Vocals arrangements (see [Renderer
-  selection](#renderer-selection)).
+- **#44 retired the picker/Auto entry.** The renderer is no longer a
+  candidate the host selects: the manifest declares no `type`, and the
+  factory publishes no `matchesArrangement`. Selection moves into the
+  karaoke UI (#32's remaining sub-issues); see [Renderer
+  selection](#renderer-selection-retired-in-44).
 
 **As shipped in #14** (`screen.js`, "Visualization provider" section):
 
@@ -77,8 +94,10 @@ transport-only and never reads manifest extensions itself.
   splitscreen's `VIZ_FACTORY_PREFIXES` falls back to. Registration carries
   its own idempotency guard (`__feedBackLyricsKaraokeVizRegistered`),
   separate from the script's `HOOK_KEY` bootstrap guard, and runs at script
-  evaluation rather than on `DOMContentLoaded` because the picker may
-  enumerate `feedBackViz_*` before then.
+  evaluation rather than on `DOMContentLoaded`, because a renderer consumer
+  (a splitscreen panel, or #32's karaoke UI) may enumerate `feedBackViz_*`
+  before then. Since #44 these two globals are the *entire* install
+  contract — nothing in the manifest advertises the renderer.
 - Registration is **unconditional**, and that is the safe-degradation path:
   a host below the minimum version simply never reads the global, so it is
   inert and the legacy overlay keeps owning playback. Probing for
@@ -89,11 +108,15 @@ transport-only and never reads manifest extensions itself.
 - Instance state is entirely panel-local (closure over the factory call).
   The one module-level structure is the live-instance set, used solely to
   decide playback ownership on the 0↔1 transitions.
-- `applySetting`/`getSetting` back every key the manifest declares
-  (feedBack#849); the host owns persistence. The manifest's ranges and
-  labels are Karaoke Highway's verbatim, so a user moving over finds the
-  same controls — plus `micFeedback`, the one key the legacy overlay ever
-  persisted.
+- `applySetting`/`getSetting` back every key `VIZ_SETTING_DEFAULTS` declares
+  (feedBack#849); whoever renders those controls owns persistence. Until #44
+  they were also declared in the manifest, whose ranges
+  and labels were Karaoke Highway's verbatim, so a user moving over found
+  the same controls — plus `micFeedback`, the one key the legacy overlay
+  ever persisted. With the manifest declaration gone no host renders them, so
+  an installed renderer runs on `VIZ_SETTING_DEFAULTS` (with the engine
+  preferences still supplying `tolerance` / `octaveIndependent` /
+  `micOffsetMs`) until #32 re-homes the controls into the karaoke UI.
 - Events: `lyrics_karaoke:renderer-ready`
   (`{filename, arrangementIndex, schemaVersion, voiceId, voices, tokens, pitched}`)
   and `lyrics_karaoke:renderer-failed`
@@ -109,7 +132,15 @@ transport-only and never reads manifest extensions itself.
   started before the window still paints) — it must not full-scan the chart
   per frame, whatever #15 replaces it with.
 
-**Capabilities declared in #14: `visualization` only.** #14's scope also
+**#44 removed `visualization` again**, along with `type: "visualization"` —
+see [Manifest scope](#manifest-scope-one-plugin-one-role-since-44). The
+renderer still exists and still runs wherever a consumer installs it; what is
+gone is the manifest's advertisement of it as a host-selectable provider,
+which also takes its `settings` descriptors with it.
+
+**Capabilities declared in #14: `visualization` only** (no longer declared as
+of #44; the plugin currently declares `audio-input` and `player-identity`).
+#14's scope also
 listed `note-detection` and `audio-input` "where supported", and Karaoke
 Highway declares both — but this plugin services neither pipeline yet. Its
 YIN detector and `getUserMedia` live in the legacy overlay rather than
@@ -144,9 +175,11 @@ version this plugin requires" is `minHost` (plugin-spec §4.1, advisory in
 the current Host), so that is what this plugin declares. It matches the
 earliest core version
 carrying every contract the ported renderer needs: the `setRenderer`
-lifecycle, `matchesArrangement` Auto-mode, per-instance visualization
-settings (`applySetting`/`getSetting`, feedBack#849), and the
-`highway:visibility` event. Hosts older than this get the legacy overlay
+lifecycle, per-instance visualization settings (`applySetting`/`getSetting`,
+feedBack#849), and the `highway:visibility` event. (`matchesArrangement`
+Auto-mode was part of this list when the renderer was picker-visible; #44
+retired it, and the rest of #32 re-homes selection into the karaoke UI.)
+Hosts older than this get the legacy overlay
 unconditionally — there is no partial-feature degradation path, since the
 renderer cannot register at all without `setRenderer`.
 
@@ -239,9 +272,10 @@ belong in `peer_requirements` (which is about Note Detect).
   prerequisites are listed in the README separately from core compatibility —
   they are runtime prerequisites, not host-version facts.
 
-## Manifest scope: one plugin, two roles
+## Manifest scope: one plugin, one role (since #44)
 
-A single `plugin.json` **may** declare both a `nav`/`screen` entry (the
+Until #44 the manifest carried two roles: A single `plugin.json` **may**
+declare both a `nav`/`screen` entry (the
 existing preparation UI) and `type: "visualization"` + a `capabilities`
 block (the new renderer) — nothing in the plugin contract (see
 `feedBack/CLAUDE.md`) restricts a manifest to one role. We keep plugin id
@@ -253,6 +287,27 @@ block (the new renderer) — nothing in the plugin contract (see
   benefit.
 - The preparation screen and the playback renderer are two facets of the
   same feature (encode vocals, then play them back), not two products.
+
+**#44 removed the second role from the manifest.** `type: "visualization"`
+and the `visualization` capability block are gone, so the host's viz picker
+no longer lists this plugin and Auto no longer selects it — which is exactly
+what #32 asks for (one karaoke toggle instead of a separate pickable entry).
+`type` also gates core's `ui.player-overlays` registration for the picker
+region, so that contribution is withdrawn with it. Per core's contract, `type`
+only ever controlled discovery: nothing about it was load-bearing for the
+renderer itself, and the plugin never called `highway.setRenderer()` itself —
+core's picker/Auto pass and splitscreen's `enterVizMode` were the call sites.
+Splitscreen builds its own per-panel dropdown from the same `type` filter
+(`vizPlugins = plugins.filter(p => p?.type === 'visualization')`), so its
+*discovery* of this plugin goes too. Its `VIZ_FACTORY_PREFIXES` probe is
+resolution, not discovery, and two routes still reach the factory: a panel
+that already persisted `__viz__:lyrics_karaoke:<arrangement name>` in
+`splitscreenPanelPrefs` (`panelToPrefs().arrName`), and the
+`_rescanVizPluginsFromWindow()` fallback that runs when the plugin registry
+fetch fails — that scan looks at `window` only and carries no `type`, so a
+host that cannot reach `/api/plugins` will still offer the plugin. Until the
+rest of #32 lands, a saved panel preference is the only route that does not
+depend on a fetch failure.
 
 ## Canonical payload schema
 
@@ -344,10 +399,16 @@ existing `voices[]` transport shape without a schema-version bump. The
 renderer draws every voice on one scale and its per-panel `sungPart` setting
 selects which voice receives the primary slab/lyric treatment.
 
-## Renderer selection
+## Renderer selection (retired in #44)
+
+**This section records how selection worked while the renderer was a
+picker-visible provider, and why #44 removed that path. It is kept because
+the analysis behind feedBack#84 is still live upstream.** Current state: the
+host neither lists nor auto-selects this plugin, and the remaining
+sub-issues of #32 put selection in the karaoke UI.
 
 Auto mode picks the first registered `matchesArrangement(songInfo)` match,
-in plugin registration order. The provider declares:
+in plugin registration order. The provider used to declare:
 
 ```js
 window.feedBackViz_lyrics_karaoke.matchesArrangement = function (songInfo) {
@@ -392,25 +453,33 @@ vocals viz. Filed as
 [feedBack#84](https://github.com/get-flashbacks/feedBack/issues/84) with the
 proposed patch; the plugin keeps the display name **"Lyrics Karaoke"**.
 
-**Until #84 lands**, Auto resolution is therefore split, and #14's
-"Vocals arrangements auto-select the provider" criterion holds only in part:
+**Until #84 lands**, Auto resolution was therefore split, and #14's
+"Vocals arrangements auto-select the provider" criterion held only in part:
 
-- **Non-notated vocals arrangements** → this provider wins Auto today.
-  Nothing else claims them (`keys_highway_3d`/`staffview` both require
-  notation, `highway_3d`/`piano` require other names, `drum_highway_3d`
-  requires a drum tab).
-- **Notated vocals arrangements** → `keys_highway_3d` wins Auto; reaching
-  this provider needs an explicit pick from the viz picker. No workaround is
-  attempted on this side.
+- **Non-notated vocals arrangements** → this provider won Auto. Nothing else
+  claimed them (`keys_highway_3d`/`staffview` both require notation,
+  `highway_3d`/`piano` require other names, `drum_highway_3d` requires a
+  drum tab).
+- **Notated vocals arrangements** → `keys_highway_3d` won Auto; reaching
+  this provider needed an explicit pick from the viz picker. No workaround
+  was attempted on this side.
 
-`staffview`'s identical bare `has_notation` is deliberately **not** included
+`staffview`'s identical bare `has_notation` was deliberately **not** included
 in #84: a staff view of a vocal line is legitimate output, unlike a piano
 roll, and it sorts after us anyway.
 
-The load-bearing constraint on **our** side is that the predicate stays keyed
-on the arrangement name and never widens to `has_notation` — widening would
-claim every notated chart rather than notated *vocals*, making this plugin
-the very thing #84 is about. `tests/screen.test.js` pins that.
+The load-bearing constraint on **our** side was that the predicate stayed
+keyed on the arrangement name and never widened to `has_notation` — widening
+would have claimed every notated chart rather than notated *vocals*, making
+this plugin the very thing #84 is about.
+
+**#44 removed the whole mechanism** rather than fixing the predicate: with no
+`type: "visualization"` the plugin is not in the picker's option list at all,
+which is also the list core's Auto pass walks, and with no predicate
+published there is nothing for Auto to match even if another route surfaced
+the id. That disposes of the collision *for this plugin* — `keys_highway_3d`
+still claims notated vocals for everyone else, so feedBack#84 remains the fix
+worth landing upstream.
 
 Lyrics-only content (no `vocal_pitch.json`, `midi` absent from every token)
 is a valid response shape from `/playback`, not an error — the renderer
@@ -534,11 +603,16 @@ behavior for pitch-less songs.
   Highway's safe defaults (`tolerance: 1` semitone, `octaveIndependent:
   false`, `micOffsetMs: 0`) fresh. #11 should not scope a migration path
   for settings the overlay never had.
-- Device/channel selection, tolerance, octave-free matching, and mic timing
-  offset are exposed as visualization `settings` (feedBack#849) so
-  splitscreen's per-panel popover renders them without host-side
-  plugin-specific code — the same mechanism Karaoke Highway's `plugin.json`
-  already declares.
+- Device/channel selection, tolerance, octave-free matching, mic timing
+  offset, sung part, and left-rail mode are the renderer's
+  `applySetting`/`getSetting` surface (feedBack#849) — the same mechanism
+  Karaoke Highway's `plugin.json` declares, and the one splitscreen's
+  per-panel popover renders without host-side plugin-specific code. **Since
+  #44 the manifest no longer declares them**, and since the plugin is no
+  longer a discovered provider at all there is no Viz ⚙ popover to hang them
+  on; the values still resolve through `VIZ_SETTING_DEFAULTS` (with the engine
+  preferences supplying the three scoring keys), and #32's remaining
+  sub-issues re-home them into the karaoke UI.
 
 ## Vocal pitch engine (#11)
 
@@ -653,10 +727,11 @@ there is no second YIN implementation, microphone path, or scorer.
 
 - Hosts older than `0.3.0-alpha.1` ignore the visualization provider fields
   and continue to use the legacy overlay path.
-- On supported hosts, disabling the visualization provider or choosing a
-  non-vocals renderer restores the legacy overlay behavior. The provider
-  does not write chart data, so rollback does not require deleting or
-  regenerating song files.
+- On supported hosts, nothing in the manifest offers the provider any more
+  (#44), so the karaoke toggle and the legacy overlay own playback unless a
+  consumer installs the factory itself. Either way the provider does not
+  write chart data, so rollback does not require deleting or regenerating
+  song files.
 - The provider and overlay never render/scoring controls simultaneously: a
   live provider instance claims playback ownership, suppresses the overlay
   and note_detect, and releases ownership on teardown.

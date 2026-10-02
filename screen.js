@@ -2472,11 +2472,11 @@
 
     // ── Visualization provider (#14) ────────────────────────────────────
     //
-    // Registers this plugin as a first-class FeedBack visualization
-    // provider (core's setRenderer contract), consuming the canonical
-    // `/playback` payload (#13) instead of re-deriving lyrics/pitch the
-    // way the legacy overlay above does. Boundaries, the minimum host
-    // version, and the settings namespace are fixed by
+    // Publishes a FeedBack visualization renderer factory (core's
+    // setRenderer contract), consuming the canonical `/playback` payload
+    // (#13) instead of re-deriving lyrics/pitch the way the legacy overlay
+    // above does. Boundaries, the minimum host version, and the settings
+    // namespace are fixed by
     // docs/architecture/vocals-visualization-integration.md (#10).
     //
     // The flat ribbon remains the lyrics-only fallback. Pitched songs use
@@ -2485,13 +2485,19 @@
 
     const VIZ_PLUGIN_ID = 'lyrics_karaoke';
 
-    // Per-instance settings. Mirrors the manifest's
-    // capabilities.visualization.settings block — the HOST owns
-    // persistence (feedBack#849), we only hold the live value and the
-    // declared default. Defaults come from #10's "Microphone and settings
-    // ownership": the legacy overlay only ever persisted `micFeedback`, so
-    // the other three start at Karaoke Highway's safe defaults rather than
-    // migrating settings that never existed.
+    // Per-instance settings. The HOST owns persistence (feedBack#849) by
+    // reading the descriptors a provider declares in its manifest and
+    // handing them to whoever installs the renderer; we only hold the
+    // live value and the default. Since #44 the manifest declares
+    // nothing, so nothing host-side renders these controls — a consumer
+    // still calls `applySetting` directly, and the values below are what
+    // the renderer runs on when it doesn't. Defaults come from #10's
+    // "Microphone and settings ownership": the legacy overlay only ever
+    // persisted `micFeedback`, so the other three start at Karaoke
+    // Highway's safe defaults rather than migrating settings that never
+    // existed. Scoring keys still start from the engine preferences (see
+    // `_vizEngineScoringDefaults`), so a calibrated tolerance/mic offset
+    // applies with no declared controls at all.
     const VIZ_SETTING_DEFAULTS = Object.freeze({
         micFeedback: true,
         tolerance: 1,
@@ -3020,16 +3026,6 @@
             _vizSuppressedKaraoke = false;
             if (_playerScreenActive) setKaraokeMode(true);
         }
-    }
-
-    /** Auto-mode predicate. Declared as a static on the factory (not the
-     *  instance) so core can evaluate it without constructing a throwaway
-     *  renderer. Kept deliberately narrow — core takes the FIRST matching
-     *  factory in picker order, so a loose predicate steals songs from
-     *  more specialized viz. */
-    function _vizMatchesArrangement(songInfo) {
-        const name = (songInfo && songInfo.arrangement) || '';
-        return /vocal/i.test(String(name));
     }
 
     /** core hands non-integer arrangement_index as `null`/absent for
@@ -4482,20 +4478,36 @@
      *  overlay keeps owning playback; probing for `setRenderer` here would
      *  be worse, since `window.highway` need not exist yet at script-load
      *  time. An instance that is nonetheless handed an unusable canvas
-     *  fails loudly via `renderer-failed` instead of throwing. */
+     *  fails loudly via `renderer-failed` instead of throwing.
+     *
+     *  These globals are the whole install contract since #44: the manifest
+     *  no longer declares `type: "visualization"`, and every viz list built
+     *  from `/api/plugins` filters on `type`, so this plugin leaves core's
+     *  picker, core's Auto-mode candidate walk, and splitscreen's per-panel
+     *  dropdown on that normal path. No Auto-mode `matchesArrangement`
+     *  static is published either, so there
+     *  is no predicate left for that walk to consult. RESOLUTION is
+     *  untouched: splitscreen's VIZ_FACTORY_PREFIXES probe is how a panel
+     *  turns an already-known id into a factory, so a panel still carrying
+     *  a saved viz preference (`splitscreenPanelPrefs[].arrName` ==
+     *  `__viz__:lyrics_karaoke:<arrangement name>`) installs this
+     *  renderer exactly as before. Splitscreen's registry-fetch failure
+     *  fallback also re-scans the window for these prefixes and would list
+     *  the plugin again. #32's later sub-issues add a karaoke-UI
+     *  consumer that resolves it deliberately. */
     function _registerVizProvider() {
         const KEY = '__feedBackLyricsKaraokeVizRegistered';
         if (window[KEY]) return false;
         window[KEY] = true;
         const factory = function () { return _createVizRenderer(); };
-        factory.matchesArrangement = _vizMatchesArrangement;
-        // Also exposed as a static so core can read it before constructing
-        // a renderer (used by Auto-mode evaluation).
+        // Also exposed as a static so a consumer can read it before
+        // constructing a renderer.
         factory.contextType = '2d';
         window.feedBackViz_lyrics_karaoke = factory;
         // Legacy alias: splitscreen's VIZ_FACTORY_PREFIXES checks
         // `feedBackViz_` first and falls back to `slopsmithViz_`. Keep both
-        // in sync if this is ever renamed.
+        // in sync if this is ever renamed. This is resolution-only — see
+        // the discovery note above.
         window.slopsmithViz_lyrics_karaoke = factory;
         return true;
     }
@@ -4521,7 +4533,7 @@
 
     // Registration only assigns globals — no DOM, no listeners — so it
     // runs at script evaluation rather than waiting for DOMContentLoaded:
-    // core's viz picker may enumerate `window.feedBackViz_*` before then.
+    // a renderer consumer may enumerate `window.feedBackViz_*` before then.
     // It carries its own idempotency guard, independent of HOOK_KEY.
     _registerVizProvider();
 
@@ -4534,7 +4546,6 @@
             VIZ_SETTING_DEFAULTS,
             _createVizRenderer,
             _registerVizProvider,
-            _vizMatchesArrangement,
             _vizSongKey,
             _vizResolveFilename,
             _vizNormalizeVoices,

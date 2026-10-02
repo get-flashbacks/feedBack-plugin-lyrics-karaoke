@@ -189,22 +189,59 @@ test('the factory returns a fresh instance per call', () => {
     assert.notStrictEqual(a, b);
 });
 
-// ── Auto-mode selection ─────────────────────────────────────────────────
+// ── Picker visibility retired (#44) ─────────────────────────────────────
+//
+// Core builds its viz picker's candidate list from `/api/plugins`
+// filtered on `type === 'visualization'`, and its Auto pass walks that
+// same list looking for a `matchesArrangement` predicate. Retiring the
+// picker entry therefore means BOTH halves are gone: the manifest no
+// longer declares `type`, and the factory publishes no predicate, so
+// Auto has nothing left to match. Splitscreen's per-panel dropdown
+// filters that same `type` field, so discovery goes there too on the
+// normal path — its `feedBackViz_` / `slopsmithViz_` prefixes are how it
+// RESOLVES an already-known id, not how it finds one. (Its registry-fetch
+// failure fallback re-scans `window` for those prefixes instead, which is
+// the one route by which it can still list this plugin.)
 
-test('matchesArrangement selects vocals arrangements', () => {
-    const m = screen._vizMatchesArrangement;
-    assert.ok(m({ arrangement: 'Vocals' }));
-    assert.ok(m({ arrangement: 'lead vocal' }));
-    assert.ok(m({ arrangement: 'VOCALS (harmony)' }));
+test('the manifest declares no viz type and no visualization capability', () => {
+    assert.strictEqual(PLUGIN_MANIFEST.type, undefined);
+    assert.strictEqual(
+        (PLUGIN_MANIFEST.capabilities || {}).visualization, undefined,
+        'capabilities.visualization still declares provider roles/settings',
+    );
+    // Everything else the host reads off the manifest is untouched.
+    assert.strictEqual(PLUGIN_MANIFEST.id, 'lyrics_karaoke');
+    assert.strictEqual(PLUGIN_MANIFEST.minHost, '0.3.0-alpha.1');
 });
 
-test('matchesArrangement leaves non-vocals arrangements alone', () => {
-    const m = screen._vizMatchesArrangement;
-    for (const arr of ['Lead', 'Rhythm', 'Bass', 'Drums', 'Keys', '']) {
-        assert.strictEqual(m({ arrangement: arr }), false, arr);
+test('the factory publishes no Auto-mode predicate', () => {
+    assert.strictEqual(
+        typeof window.feedBackViz_lyrics_karaoke.matchesArrangement, 'undefined',
+    );
+    assert.strictEqual(
+        typeof window.slopsmithViz_lyrics_karaoke.matchesArrangement, 'undefined',
+    );
+    assert.strictEqual(screen._vizMatchesArrangement, undefined);
+});
+
+test('either factory prefix still yields a setRenderer-shaped renderer', () => {
+    // Dropping the picker entry must not disturb the install contract.
+    // Splitscreen turns a viz id into a factory by probing these two
+    // prefixes in order — the path a panel with a saved viz preference
+    // (`splitscreenPanelPrefs[].arrName` == `__viz__:lyrics_karaoke:<arr
+    // name>`) still takes — and hands whatever it gets to
+    // `panel.hw.setRenderer()`, which rejects a factory that lacks the
+    // lifecycle surface.
+    const PREFIXES = ['feedBackViz_', 'slopsmithViz_'];
+    for (const prefix of PREFIXES) {
+        const factory = window[prefix + 'lyrics_karaoke'];
+        assert.strictEqual(typeof factory, 'function', prefix);
+        const r = factory();
+        for (const method of ['init', 'draw', 'destroy', 'applySetting', 'getSetting']) {
+            assert.strictEqual(typeof r[method], 'function', `${prefix}.${method}`);
+        }
+        assert.strictEqual(r.getSetting('micFeedback'), true, prefix);
     }
-    assert.strictEqual(m(null), false);
-    assert.strictEqual(m({}), false);
 });
 
 // ── Payload helpers ─────────────────────────────────────────────────────
@@ -723,39 +760,31 @@ test('draw skips a zero-sized canvas', async () => {
 
 // ── Manifest / renderer agreement ───────────────────────────────────────
 
-test('every manifest-declared setting is backed by applySetting', () => {
-    const declared = PLUGIN_MANIFEST.capabilities.visualization.settings;
-    assert.ok(Array.isArray(declared) && declared.length > 0);
-
+test('applySetting backs every key the renderer defaults', () => {
+    // The manifest no longer declares a settings list (#44), so nothing
+    // drives applySetting from the host's picker UI any more — but the
+    // renderer still honours the contract (feedBack#849), because
+    // splitscreen persists per-panel values and calls it directly, and
+    // #32's later sub-issues re-home these controls into the karaoke UI.
     const r = window.feedBackViz_lyrics_karaoke();
-    for (const decl of declared) {
-        // A provider that declares `settings` MUST implement applySetting
-        // for each key (feedBack#849) — the host calls it per panel.
+    const keys = Object.keys(screen.VIZ_SETTING_DEFAULTS);
+    assert.ok(keys.length > 0);
+    for (const key of keys) {
+        const def = screen.VIZ_SETTING_DEFAULTS[key];
         assert.strictEqual(
-            r.applySetting(decl.key, decl.default), true,
-            `applySetting rejected declared key ${decl.key}`,
+            r.applySetting(key, def), true,
+            `applySetting rejected defaulted key ${key}`,
         );
-        assert.strictEqual(
-            r.getSetting(decl.key), decl.default,
-            `default drifted for ${decl.key}`,
-        );
-        assert.deepStrictEqual(
-            screen.VIZ_SETTING_DEFAULTS[decl.key], decl.default,
-            `manifest default for ${decl.key} disagrees with the renderer's`,
-        );
+        assert.strictEqual(r.getSetting(key), def, `default drifted for ${key}`);
     }
-    // And nothing the renderer defaults is missing from the manifest.
-    const keys = declared.map((d) => d.key).sort();
-    assert.deepStrictEqual(Object.keys(screen.VIZ_SETTING_DEFAULTS).sort(), keys);
 });
 
-test('manifest declares the visualization type and a minimum host', () => {
-    assert.strictEqual(PLUGIN_MANIFEST.type, 'visualization');
-    assert.strictEqual(PLUGIN_MANIFEST.minHost, '0.3.0-alpha.1');
-    // The preparation surface must survive taking on the second role (#14).
+test('the preparation surface survives retiring the viz picker entry', () => {
+    // #44 took away the second role's picker visibility, not the plugin.
     assert.strictEqual(PLUGIN_MANIFEST.screen, 'screen.html');
     assert.ok(PLUGIN_MANIFEST.nav && PLUGIN_MANIFEST.nav.label);
     assert.strictEqual(PLUGIN_MANIFEST.routes, 'routes.py');
+    assert.strictEqual(PLUGIN_MANIFEST.script, 'screen.js');
 });
 
 // ── Regression: a failed load must not refetch on every frame ───────────
@@ -868,21 +897,11 @@ test('the windowed loop stops early instead of walking the whole song', () => {
 });
 
 // ── Auto-mode collision surface (#10 asked for this to be re-verified) ──
-
-test('the predicate claims nothing on arrangement name alone being notated', () => {
-    // Staff View's Auto predicate is a bare `!!songInfo.has_notation` with
-    // no instrument filter, so it claims EVERY notated arrangement. Ours
-    // must stay keyed on the arrangement name only — never widen to
-    // has_notation — or the two would collide on every notated chart
-    // instead of just notated *vocals*.
-    const m = screen._vizMatchesArrangement;
-    assert.strictEqual(m({ arrangement: 'Lead', has_notation: true }), false);
-    assert.strictEqual(m({ arrangement: 'Keys', has_notation: true }), false);
-    assert.strictEqual(m({ arrangement: 'Drums', has_notation: true }), false);
-    // A notated *vocals* chart is a genuine overlap, resolved by order:
-    // `lyrics_karaoke` < `staffview` as both an id and a display name.
-    assert.strictEqual(m({ arrangement: 'Vocals', has_notation: true }), true);
-});
+//
+// Retiring the Auto predicate (#44) settles the collision this section was
+// written to guard: Staff View's predicate is a bare
+// `!!songInfo.has_notation`, so with no predicate of our own there is
+// nothing for it to win or lose against, on any arrangement.
 
 test('a notation-only vocals chart still renders (lyrics are song-level)', async () => {
     // Unlike Piano Highway, this provider decodes nothing from guitar-wire
