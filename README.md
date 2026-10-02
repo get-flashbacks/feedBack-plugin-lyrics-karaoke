@@ -6,13 +6,12 @@ them in FeedBack's vocals highway during playback. The plugin id remains
 
 ## Why choose the get-flashbacks edition?
 
-Choose this edition if you want singing to use FeedBack's main visualization
-picker. On a supported host, **Auto** selects a pitch highway for a Vocals
-arrangement, with timed syllables, note slabs, and guide bars for duets. You
-can score a chosen voice with an explicitly started microphone, and use the
-renderer in splitscreen alongside an instrument or another vocals panel.
-The preparation tools and legacy overlay remain available, so existing
-prepared packs do not need to be rebuilt.
+Choose this edition if you want singing to run on FeedBack's own highway.
+The vocals renderer renders timed syllables, note slabs, and guide bars for
+duets, scores a chosen voice from an explicitly started microphone, and works
+in splitscreen alongside an instrument or another vocals panel. The
+preparation tools and the legacy pitch-ribbon overlay are also here, so
+existing prepared packs do not need to be rebuilt.
 
 The [official got-feedBack plugin](https://github.com/got-feedBack/feedBack-plugin-lyrics-karaoke)
 already prepares lyrics and pitch and offers an overlay with microphone
@@ -23,8 +22,20 @@ a community-maintained fork, not an official got-feedBack release.
 ## Install and requirements
 
 Install this plugin in FeedBack's plugin directory and enable it in the host.
-The highway visualization requires FeedBack **0.3.0-alpha.1 or later**. Older
-hosts continue to use the legacy karaoke overlay.
+The highway renderer requires FeedBack **0.3.0-alpha.1 or later**. Older
+hosts, and hosts on 1.13.0 with no consumer for the factory, use the legacy
+karaoke overlay.
+
+As of 2026-10-02 this edition is mid-migration. Since 1.13.0
+([#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44))
+it no longer appears in FeedBack's visualization picker, in Auto mode, or in
+splitscreen's per-panel dropdown, and the **Karaoke** button still drives the
+legacy pitch ribbon rather than the highway renderer. The renderer itself is
+unchanged and still builds from the plugin factory, so a splitscreen panel
+that already had Lyrics Karaoke saved as its visualization keeps loading it.
+The rest of
+[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
+wires it behind the Karaoke button.
 
 ### Core compatibility
 
@@ -99,11 +110,12 @@ that manifest shape.
 
 ## Play and score
 
-Choose a **Vocals** arrangement. FeedBack's Auto visualization selects the
-Lyrics Karaoke highway when the host supports it. The canvas shows pitch
-lanes, note slabs, timed syllables, and, in a duet, guide bars for the other
-part. **Sung part** chooses the part to score for each panel. **Left rail**
-switches between absolute pitch, technique feedback, and off.
+Choose a **Vocals** arrangement and turn on the **Karaoke** button to get the
+pitch ribbon with its 🎤 control. The highway renderer draws pitch lanes, note
+slabs, timed syllables, and, in a duet, guide bars for the other part — but
+since 1.13.0 no host control selects it; see
+[migration status](#why-choose-the-get-flashbacks-edition). A splitscreen panel
+that already had Lyrics Karaoke selected as its visualization still loads it.
 
 Microphone access starts only when you click the shared **🎤** control.
 Permission can be denied without stopping lyric playback. The device and
@@ -115,16 +127,18 @@ control stays visible but disabled with the upgrade reason. Closing the panel, c
 song or part, or stopping capture releases the stream. Audio is analyzed in
 the plugin for pitch; raw audio is not stored or transmitted.
 
-The visualization settings include **Microphone feedback**, **Octave-free
-pitch match**, **Pitch tolerance**, **Mic timing offset**, **Sung part**, and
-**Left rail**. To calibrate timing, sing a short known note and adjust **Mic
-timing offset (ms)** until the sung trace aligns with the note slab. This
-changes scoring alignment, not playback. Start with the default 0 ms and
-change it only when the trace consistently leads or lags.
+**Microphone feedback**, **Octave-free pitch match**, **Pitch tolerance**,
+**Mic timing offset**, **Sung part**, and **Left rail** are renderer settings
+whose descriptors used to live in `plugin.json`. That block is gone as of
+1.13.0, so no host renders controls for them: **Pitch tolerance**,
+**Octave-free pitch match**, and **Mic timing offset** take the engine
+preferences, and the rest run on their defaults. Re-homing them into the
+karaoke UI is the next part of
+[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
 
 ## Fallback, migration, and rollback
 
-If the provider is unavailable or disabled, the legacy overlay remains the
+If the renderer is unavailable or disabled, the legacy overlay remains the
 compatibility path. Provider and overlay ownership is exclusive, including
 microphone capture and scoring. Compatible Karaoke Highway preferences are
 imported once; its old microphone-on state is ignored so capture still needs
@@ -136,12 +150,12 @@ back to a compatible Lyrics Karaoke release.
 
 | Symptom | Check |
 | --- | --- |
-| No highway | Use FeedBack 0.3.0-alpha.1 or later, a Vocals arrangement, and Auto or Lyrics Karaoke visualization. |
+| No highway | Lyrics Karaoke is not in the visualization picker, Auto, or splitscreen's dropdown since 1.13.0. The **Karaoke** button gives you the pitch ribbon; the highway returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
 | Song does not resolve on an old host | A song pack that is a symlink pointing outside the library is refused by the pre-`0dcc913` fallback; update the host. |
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
-| No microphone scoring | Enable Microphone feedback, click 🎤, grant browser permission, and select a pitched part. |
+| No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
-| Voice appears late or early | Adjust Mic timing offset in small steps while singing a known note. |
+| Voice appears late or early | Scoring runs on the engine's mic offset; a control for it returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; the renderer reports malformed packs separately from missing ones. |
 
 ## Development and provenance
