@@ -103,4 +103,7 @@ The visualization provider:
    once per unresolvable streak, and clears any previously loaded
    song's data rather than leaving it on screen.
 
-Fixtures and route tests live in `tests/test_playback_payload.py`.
+Fixtures and route tests live in `tests/test_playback_payload.py`. The
+boundary rules above are enforced structurally by `tests/playback_schema.py`,
+driven against generated, copyright-free packs in
+`tests/test_generated_feedpaks.py`.

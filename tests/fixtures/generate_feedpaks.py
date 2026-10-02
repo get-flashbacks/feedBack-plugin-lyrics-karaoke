@@ -3,6 +3,9 @@
 Run ``python tests/fixtures/generate_feedpaks.py OUTPUT_DIR``. The archives
 contain only invented syllables and metadata; no audio or copyrighted media.
 They exercise prepared-data playback, not the preparation pipeline.
+
+``tests/test_generated_feedpaks.py`` drives the routes over these packs via
+``unpack``, which is why the manifests declare every file they reference.
 """
 
 from __future__ import annotations
@@ -116,6 +119,19 @@ def generate(output_dir: Path):
                 pack.writestr(filename, json.dumps(content, sort_keys=True))
         paths[name] = path
     return paths
+
+
+def unpack(pack_path: Path, dest: Path) -> Path:
+    """Extract a generated pack into ``dest`` and return it.
+
+    A host resolves a zip-form song to the directory it unpacked it into, and
+    every route reads the manifest and sidecars from there, so route tests
+    need the unpacked form rather than the archive.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pack_path) as pack:
+        pack.extractall(dest)
+    return dest
 
 
 if __name__ == "__main__":
