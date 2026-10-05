@@ -111,9 +111,13 @@ that manifest shape.
 ## Play and score
 
 Choose a **Vocals** arrangement and turn on the **Karaoke** button to get the
-pitch ribbon with its 🎤 control. The highway renderer draws pitch lanes, note
-slabs, timed syllables, and, in a duet, guide bars for the other part — but
-since 1.13.0 no host control selects it; see
+pitch ribbon with its 🎤 control. The ribbon draws pitch bars, timed syllables,
+and — with the microphone on — an accuracy tint on what you have sung. In a
+duet pack it also marks the other parts with thin guide bars on the same
+chart, and a bouncing cue under the syllable you are on becomes a get-ready
+countdown across a silent lead-in. The highway renderer draws pitch lanes,
+note slabs, timed syllables, and guide bars for the other part — but since
+1.13.0 no host control selects it; see
 [migration status](#why-choose-the-get-flashbacks-edition). A splitscreen panel
 that already had Lyrics Karaoke selected as its visualization still loads it.
 

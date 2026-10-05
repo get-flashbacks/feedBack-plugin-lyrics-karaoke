@@ -10,6 +10,21 @@ and the repository's tagged history.
 
 ## [Unreleased]
 
+### Added
+
+- The **Karaoke** button's pitch ribbon now draws the highway's features
+  directly ([#45](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/45),
+  second step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)).
+  In a duet pack the other parts are marked with thin guide bars on the same
+  chart, and a bouncing cue under the syllable you are on turns into a
+  get-ready countdown across a silent lead-in. It is the same ribbon with more
+  on it, not a second visual mode: a solo pack, a lyrics-only song, or a host
+  that can't reach `/playback` draws exactly what it drew before, and a song
+  switch clears the cue. Scored and guide pitches now share one song-wide axis,
+  so a harmony part an octave above the lead stays on the strip.
+- The ribbon's accuracy tint now uses the same red→amber→green ramp as the
+  highway renderer, so one accuracy reads as one colour in both.
+
 ### Changed
 
 - Lyrics Karaoke is no longer a separate visualization-picker entry

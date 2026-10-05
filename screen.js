@@ -29,6 +29,11 @@
     let currentSong = null;          // {filename, format, ...} from window.slopsmith
     let status = null;               // last /status payload
     let pitchData = null;            // {tokens: [{t, d, w, midi?}, ...]}
+    // Every voice in the canonical `/playback` payload, in the route's own
+    // `{start, duration, text, midi}` shape. The ribbon scores/draws the
+    // primary (already mapped into pitchData.tokens below); the rest are
+    // duet guides only. Cleared per song alongside pitchData.
+    let overlayVoices = [];
     let tokenIndexMap = new Map();   // tok → index into pitchData.tokens; rebuilt on each load
     let songPitchRange = null;       // {lo, hi} fixed across the song so bars don't shift vertically as the window scrolls
     let karaokeMode = false;         // user toggle
@@ -67,6 +72,13 @@
     const RIBBON_HEIGHT_PX = 140;
     const BAR_PAD_PX = 2;
     const BAR_RADIUS = 4;
+    const RIBBON_TEXT_FONT_PX = 14;   // must match the draw-time font below
+    // Get-ready cue (#45). A gap this long before the next syllable counts as
+    // a real silent lead-in rather than ordinary inter-word spacing, and the
+    // numeric countdown only runs over the last COUNTDOWN_MAX_S of it, so a
+    // long instrumental break doesn't leave a stale number hanging around.
+    const RIBBON_CUE_LEADIN_MIN_S = 2;
+    const RIBBON_CUE_COUNTDOWN_MAX_S = 20;
 
     // Centralized class strings — every render path picks one of these so
     // the disabled/enabled visual state always matches the .disabled flag.
@@ -147,6 +159,66 @@
         return pitchData;
     }
 
+    // ── Duet guides (#45) ───────────────────────────────────────────────
+    //
+    // The ribbon scores and draws the PRIMARY voice from `/data` (unchanged
+    // — see the ownership note in
+    // docs/architecture/vocals-visualization-integration.md). The other
+    // voices of a duet pack only exist in the canonical `/playback` payload
+    // (#13), so they arrive on their own best-effort fetch: a pack with one
+    // singer, an unprepared song, or a host that can't reach the route all
+    // land on an empty guide list, which draws nothing. There is deliberately
+    // no "duet mode" to fall out of that — guides are additive marks on the
+    // same ribbon, which is the whole point of #45.
+    //
+    // Pure over the payload so it is unit-testable without a fetch; the
+    // fetch wrapper only supplies the bytes and drops them on a song switch.
+    function _ribbonGuidesFromPayload(payload) {
+        const voices = _vizNormalizeVoices(payload);
+        const scored = _vizScoredIndex(voices);
+        const out = [];
+        for (let i = 0; i < voices.length; i++) {
+            if (i === scored) continue;
+            const tokens = [];
+            for (const tok of voices[i].tokens) {
+                if (tok.midi === null) continue;   // an unpitched guide has nothing to place
+                tokens.push({ start: tok.start, duration: tok.duration, midi: tok.midi });
+            }
+            if (!tokens.length) continue;
+            out.push({
+                name: voices[i].name || voices[i].id,
+                // Palette index is by position among the GUIDES, so the first
+                // guide is always teal whichever voice is scored — the same
+                // rule the stage renderer uses.
+                colorIndex: out.length,
+                tokens,
+            });
+        }
+        return out;
+    }
+
+    async function fetchRibbonGuides(filename) {
+        const token = ++inflightFetch;
+        const url = `/api/plugins/lyrics_karaoke/playback?filename=${encodeURIComponent(filename)}`;
+        const res = await safeFetch(url);
+        if (token !== inflightFetch) return null;   // a newer song took over
+        overlayVoices = res.ok ? _ribbonGuidesFromPayload(res.body) : [];
+        // Guides share the scored voice's axis, so the song-wide pitch range
+        // has to cover them too — recomputed here rather than left at the
+        // `/data` value, which knows nothing about harmony parts.
+        songPitchRange = computeSongPitchRange(pitchData, ribbonGuideMidis());
+        return overlayVoices;
+    }
+
+    /** Every midi a guide voice contributes, for the shared axis. */
+    function ribbonGuideMidis() {
+        const out = [];
+        for (const voice of overlayVoices) {
+            for (const tok of voice.tokens) out.push(tok.midi);
+        }
+        return out;
+    }
+
     // Shared 5th/95th-percentile pitch-range math (screen.js's own two
     // renderers — the legacy overlay and the visualization provider — both
     // need "a fixed range for the whole song, widened to a floor". One
@@ -176,7 +248,10 @@
     // would suddenly snap to the top when a lower-pitched syllable
     // entered the window). We trim 5%/95% percentiles so a single
     // octave-error outlier doesn't squash the rest of the song flat.
-    function computeSongPitchRange(data) {
+    // `extraMidis` carries the duet guides' pitches so a harmony part an
+    // octave above the lead doesn't draw off the top of the strip (#45) —
+    // the guides share the scored voice's axis rather than carrying their own.
+    function computeSongPitchRange(data, extraMidis) {
         const tokens = (data && Array.isArray(data.tokens)) ? data.tokens : [];
         const midis = [];
         for (const t of tokens) {
@@ -185,7 +260,19 @@
         // Unlike the provider's _vizPitchRange, this caller never signals
         // "lyrics-only" via null — the legacy overlay always has a strip to
         // draw, so an unpitched song still gets a sane default band.
-        return _percentilePitchRange(midis) || { lo: 60, hi: 60 + MIN_PITCH_SPAN_SEMITONES };
+        const lead = _percentilePitchRange(midis);
+        const guides = _percentilePitchRange(
+            (Array.isArray(extraMidis) ? extraMidis : [])
+                .filter((m) => typeof m === 'number' && isFinite(m)),
+        );
+        const base = lead || { lo: 60, hi: 60 + MIN_PITCH_SPAN_SEMITONES };
+        if (!guides) return base;
+        // The guides are their own population, so their outliers are trimmed
+        // against THEMSELVES and the two trimmed ranges are unioned — pooling
+        // every midi into one percentile sort would let a short lead part
+        // drag the guide's whole range outside the 5%/95% window and clip it
+        // off the strip.
+        return { lo: Math.min(base.lo, guides.lo), hi: Math.max(base.hi, guides.hi) };
     }
 
     // ── Button wiring ──────────────────────────────────────────────────
@@ -321,6 +408,8 @@
                     if (status && status.has_pitch) {
                         await fetchPitchData(clickFilename);
                         if (currentSong && currentSong.filename !== clickFilename) return;
+                        await fetchRibbonGuides(clickFilename);
+                        if (currentSong && currentSong.filename !== clickFilename) return;
                         if (!_playerScreenActive) return;
                         setKaraokeMode(true);
                     }
@@ -340,6 +429,8 @@
         } else {
             if (!pitchData) {
                 await fetchPitchData(clickFilename);
+                if (currentSong && currentSong.filename !== clickFilename) return;
+                await fetchRibbonGuides(clickFilename);
                 if (currentSong && currentSong.filename !== clickFilename) return;
                 if (!_playerScreenActive) return;
             }
@@ -571,6 +662,159 @@
         return { lo, hi };
     }
 
+    /** One guide voice as thin flat bars (#45). Windowed per frame exactly like
+     *  the scored bars — the tokens are start-sorted, so the walk enters at a
+     *  lower bound and leaves on the first token past the right edge, with
+     *  the same overscan the scored window uses so a guide doesn't pop at the
+     *  edges. */
+    function drawRibbonGuides(now, xFor, yFor, barHeight, dpr) {
+        if (!overlayVoices.length) return;
+        const winLeft = now - PLAYHEAD_FRAC * VISIBLE_SECONDS - 0.5;
+        const winRight = now + (1 - PLAYHEAD_FRAC) * VISIBLE_SECONDS + 0.5;
+        const guideH = Math.max(3 * dpr, barHeight * 0.4);
+        const guideR = Math.min(BAR_RADIUS * dpr, guideH / 2);
+        for (const voice of overlayVoices) {
+            ctx.fillStyle = STAGE_VOICE_COLORS[voice.colorIndex % STAGE_VOICE_COLORS.length];
+            const tokens = voice.tokens;
+            for (let i = _lowerBoundByStart(tokens, winLeft); i < tokens.length; i++) {
+                const gt = tokens[i];
+                if (gt.start > winRight) break;
+                if (gt.start + gt.duration < winLeft) continue;
+                const gx0 = xFor(gt.start);
+                const gw = Math.max(2 * dpr, xFor(gt.start + gt.duration) - gx0 - 2 * BAR_PAD_PX * dpr);
+                const gy = yFor(gt.midi) + (barHeight - guideH) / 2;
+                roundFillRect(ctx, gx0 + BAR_PAD_PX * dpr, gy, gw, guideH, guideR);
+            }
+        }
+    }
+
+    /** First index in a start-sorted token array with `start >= t`. The
+     *  stage's `_vizLowerBound` speaks `{start, duration}` too, but it is
+     *  documented against the canonical payload's contract; this one takes
+     *  the ribbon's guide tokens directly and keeps the two renderers'
+     *  lookups independent. */
+    function _lowerBoundByStart(tokens, t) {
+        let lo = 0;
+        let hi = tokens.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (tokens[mid].start < t) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    // ── Get-ready cue (#45) ─────────────────────────────────────────────
+    //
+    // Karaoke Highway's phase-2 cue, adapted to the flat ribbon's geometry:
+    // a ball bouncing beneath the syllable being sung, and a numeric
+    // countdown when the next syllable is still a real silent lead-in away.
+    // Additive like every other #45 layer — a lyrics-only song draws the same
+    // ribbon plus the cue, with nothing to indicate a "mode".
+    //
+    // `ribbonCue` is the overlay's own animation state (the smoothed ball x
+    // and the beat estimate), reset on every song change so a new song never
+    // inherits a position from the last one.
+    const ribbonCue = { beat: 0.5, ballX: null };
+
+    function _ribbonCueReset() {
+        // A stable, song-level tempo estimate (median syllable spacing) so
+        // the bounce doesn't change pace with each phrase — same rule, and
+        // the same helper, as the stage renderer.
+        ribbonCue.beat = _vizComputeCueBeat(_lkOverlayRows);
+        ribbonCue.ballX = null;
+    }
+
+    /** Which syllable the cue belongs to right now, from the start-sorted
+     *  token rows. Pure over its arguments so it can be unit-tested without a
+     *  canvas, and returns null when there is nothing to cue (before the
+     *  first syllable, past the last, or in a short gap where the stage
+     *  renderer likewise shows no ball). */
+    function _ribbonCueTarget(rows, now) {
+        if (!rows || !rows.length) return null;
+        // First row not yet finished. `rows` is start-sorted, so this is a
+        // binary search — the whole point of keeping a sorted copy rather
+        // than rescanning pitchData.tokens (whose order /data doesn't
+        // promise) every frame.
+        let lo = 0;
+        let hi = rows.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (now >= rows[mid].start + rows[mid].duration + 0.05) lo = mid + 1;
+            else hi = mid;
+        }
+        const i = lo;
+        const tok = rows[i];
+        if (!tok) return null;
+        if (tok.start > now) {
+            const remain = tok.start - now;
+            // A gap before the FIRST syllable is measured from zero; every
+            // other gap from the syllable just finished.
+            const gapStart = i > 0 ? rows[i - 1].start + rows[i - 1].duration : 0;
+            const gap = i > 0 ? tok.start - gapStart : tok.start;
+            if (gap >= RIBBON_CUE_LEADIN_MIN_S && remain <= RIBBON_CUE_COUNTDOWN_MAX_S) {
+                return { kind: 'countdown', index: i, remain };
+            }
+            // An ordinary phrasing gap: the ball rests under the syllable just
+            // finished, which is what the stage's `activeX ?? lastX` fallback
+            // does. Before the very first syllable there is nothing to rest
+            // under, so there is no ball at all.
+            return i > 0 ? { kind: 'bounce', index: i - 1 } : null;
+        }
+        // `tok.start <= now` here (the countdown branch handled the rest), so
+        // this row is either the active syllable or already finished with the
+        // next one not due yet — an ordinary short gap. In the gap case the
+        // ball rests under the last finished syllable rather than vanishing,
+        // matching the stage's `info.activeX ?? info.lastX` fallback.
+        const active = now < tok.start + tok.duration;
+        return { kind: 'bounce', index: active ? i : Math.max(0, i - 1) };
+    }
+
+    /** The bounce ball / countdown, drawn in the ribbon's text band (#45).
+     *  `textBandTop` is the y the syllable text starts at. Mirrors the stage
+     *  renderer's cue: the same x-smoothing factor, the same sine bounce
+     *  phase against the syllable's own start, the same colours. */
+    function drawRibbonCue(now, xFor, textBandTop, dpr) {
+        const rows = _lkOverlayRows;
+        const target = _ribbonCueTarget(rows, now);
+        if (!target) {
+            ribbonCue.ballX = null;
+            return;
+        }
+        const tok = rows[target.index];
+        const cx = (xFor(tok.start) + xFor(tok.start + tok.duration)) / 2;
+        ribbonCue.ballX = ribbonCue.ballX === null ? cx : ribbonCue.ballX + (cx - ribbonCue.ballX) * 0.18;
+
+        const fontPx = RIBBON_TEXT_FONT_PX * dpr;
+        const baselineY = textBandTop + 4 * dpr;
+
+        if (target.kind === 'countdown') {
+            // The number sits to the LEFT of the syllable it counts down to,
+            // so it never covers the word about to be sung.
+            ctx.fillStyle = 'rgba(120,210,255,0.95)';
+            ctx.font = `bold ${Math.round(fontPx * 1.1)}px sans-serif`;
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'top';
+            ctx.fillText(target.remain.toFixed(1), ribbonCue.ballX - fontPx * 0.6, baselineY);
+        }
+
+        const beat = ribbonCue.beat || 0.5;
+        const bounce = Math.abs(Math.sin(Math.PI * (now - tok.start) / beat));
+        const ballY = baselineY + fontPx + 6 * dpr - 5 * dpr * bounce;
+        const radius = Math.max(3, fontPx * 0.16);
+        ctx.save();
+        ctx.shadowColor = 'rgba(150,210,255,0.85)';
+        ctx.shadowBlur = 6;
+        ctx.fillStyle = '#eaf4ff';
+        ctx.beginPath();
+        ctx.arc(ribbonCue.ballX, ballY, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        ctx.font = `${Math.round(fontPx)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+    }
+
     function drawFrame() {
         if (!canvas || !ctx) return;
         if (!pitchData) return;
@@ -611,7 +855,14 @@
             return barTop + frac * Math.max(0, barBand - barHeight);
         };
 
-        ctx.font = `${Math.round(14 * dpr)}px sans-serif`;
+        // Duet guides (#45) — every voice except the scored one, drawn on
+        // the SAME axis and window as the scored bars so the ribbon stays one
+        // chart. Flat, thin and dim by construction: a guide marks where the
+        // other part goes for timing and must never compete with the voice
+        // being sung.
+        drawRibbonGuides(now, xFor, yFor, barHeight, dpr);
+
+        ctx.font = `${Math.round(RIBBON_TEXT_FONT_PX * dpr)}px sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
 
@@ -652,6 +903,8 @@
             }
         }
 
+        drawRibbonCue(now, xFor, barTop + barBand, dpr);
+
         // Mic-feedback overlays — only when the user has been singing.
         if (_lkOverlayScorer.hasResults() || overlayMicState() === 'listening') {
             for (const { tok, midi } of visible) {
@@ -666,7 +919,13 @@
                 const w = Math.max(2 * dpr, x1 - x0 - 2 * BAR_PAD_PX * dpr);
                 const x = x0 + BAR_PAD_PX * dpr;
                 const y = yFor(midi);
-                ctx.fillStyle = `rgba(${Math.round(255 * (1 - acc))}, ${Math.round(255 * acc)}, 64, 0.55)`;
+                // The shared red→amber→green ramp (#45): the ribbon and the
+                // stage now read as one thing, so the same accuracy reads as
+                // the same colour in either. Previously this computed its own
+                // two-channel lerp, which bottomed out at pure yellow and
+                // read differently from the highway's.
+                const [cr, cg, cb] = _vizAccuracyRgb(acc);
+                ctx.fillStyle = `rgba(${Math.round(cr)}, ${Math.round(cg)}, ${Math.round(cb)}, 0.55)`;
                 roundFillRect(ctx, x, y, w, barHeight, BAR_RADIUS * dpr);
             }
 
@@ -1635,6 +1894,9 @@
     // pitchData.tokens index → scorer index. The scorer needs start-sorted
     // tokens and /data doesn't promise an order, so it gets a sorted copy.
     let _lkOverlayIndex = [];
+    // The same start-sorted rows, kept for the get-ready cue's per-frame
+    // binary search (#45).
+    let _lkOverlayRows = [];
 
     function _lkOverlaySyncTokens() {
         const src = (pitchData && Array.isArray(pitchData.tokens)) ? pitchData.tokens : [];
@@ -1647,8 +1909,13 @@
         rows.sort((a, b) => (a.start - b.start) || (a.i - b.i));
         _lkOverlayIndex = new Array(rows.length);
         rows.forEach((row, sortedIdx) => { _lkOverlayIndex[row.i] = sortedIdx; });
+        // The same sorted rows back the get-ready cue (#45), which binary
+        // searches them per frame — it must not rescan the unsorted
+        // pitchData.tokens to find the active syllable.
+        _lkOverlayRows = rows;
         _lkOverlayScorer.setTokens(rows);
         userDisplayMidi = null;
+        _ribbonCueReset();
     }
 
     function _lkOverlayResultFor(tokenIdx) {
@@ -1857,6 +2124,7 @@
         currentSong = song || null;
         status = null;
         pitchData = null;
+        overlayVoices = [];
         tokenIndexMap = new Map();
         _lkOverlaySyncTokens();
         songPitchRange = null;
@@ -1882,6 +2150,10 @@
         // Pre-fetch pitch data so the first toggle is instant.
         if (status && status.has_pitch) {
             await fetchPitchData(song.filename);
+            // Duet guides (#45), best-effort: a solo pack, an unprepared
+            // song, or a host that can't reach /playback just yields no
+            // guides and the ribbon draws exactly as it did before.
+            await fetchRibbonGuides(song.filename);
         }
         refreshButtonState();
     }
@@ -4572,6 +4844,12 @@
             _vizLowerBound,
             _percentilePitchRange,
             computeSongPitchRange,
+            // #45: the ribbon absorbed the highway's inline capabilities
+            _ribbonGuidesFromPayload,
+            _ribbonCueTarget,
+            _lowerBoundByStart,
+            STAGE_VOICE_COLORS,
+            _vizAccuracyRgb,
             _vizOwnsPlayback,
             _vizDrawFrame,
             setKaraokeMode,
@@ -4612,6 +4890,19 @@
                 // ever sets, so a peer that blocks every start can never
                 // make that precondition true and the toggle can't cover it.
                 startMic,
+            },
+            // #45: a seam onto the ribbon's own draw. showOverlay() builds the
+            // canvas from real host DOM (#player/#highway), which no stub here
+            // has, so the frame is exercised by handing it a canvas directly
+            // — the same shape drawFrame() reads every frame in production.
+            _lkOverlayRender: {
+                drawFrame,
+                attachCanvas(c, cx) { canvas = c; ctx = cx; },
+                detachCanvas() { canvas = null; ctx = null; },
+                _lkOverlaySyncTokens,
+                voices: () => overlayVoices,
+                rows: () => _lkOverlayRows,
+                pitchRange: () => songPitchRange,
             },
             _vizOnMicClick,
             _vizMicTarget,
