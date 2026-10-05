@@ -2589,7 +2589,16 @@ test('the ribbon tints sung syllables with the shared accuracy ramp', async () =
     assert.ok(ctx.fills.includes(expected),
         `expected the shared green end of the ramp (${expected}), got ${JSON.stringify(ctx.fills)}`);
     // A song change is what clears results in production (resetForNewSong);
-    // the tint must not survive into the next song's ribbon.
+    // the tint must not survive into the next song's ribbon. Draw a frame at
+    // a clock inside the syllable that was just scored — without the reset the
+    // scorer still holds that result and the tint reappears, so the guard has
+    // to look at a drawn frame, not just at the song change.
     screen._lkOverlayRender.detachCanvas();
     await screen._lkOverlayUi.onSongLoaded({ filename: 'other.sloppak', format: 'sloppak' });
+    const after = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 1.2;
+    screen._lkOverlayRender.drawFrame();
+    assert.ok(!after.fills.includes(expected),
+        `the tint survived the song change: ${JSON.stringify(after.fills)}`);
+    screen._lkOverlayRender.detachCanvas();
 });
