@@ -38,7 +38,8 @@ and the repository's tagged history.
   `plugin.json`. That check is intentionally allowed to remain red for this
   PR because the combined release of #44 and #45 has not shipped yet — the
   version bump belongs with the release, not with each intermediate
-  sub-issue. (Note: `plugin.json` was also left at 1.13.0 in commit `41163a3` for #44.) No functional behavior changes.
+  sub-issue. (`plugin.json` was also left at 1.13.0 in commit `41163a3` for
+  #44.)
 
 ### Changed
 
