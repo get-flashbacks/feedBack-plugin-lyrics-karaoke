@@ -132,6 +132,43 @@ transport-only and never reads manifest extensions itself.
   started before the window still paints) — it must not full-scan the chart
   per frame, whatever #15 replaces it with.
 
+### The ribbon absorbs the stage's capabilities inline (#45)
+
+The overlay is now the main player's only route to karaoke (#44 retired the
+picker entry), so #45 — the second sub-issue of
+[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
+— grows the highway's features **into the existing ribbon** rather than
+swapping in the stage. Same chart, same playhead, same toggle: it must read as
+the ribbon getting better, not as a different-looking mode.
+
+What moved, and where it came from:
+
+- **Accuracy tint** — already present, but on its own two-channel red/green
+  lerp. It now uses the stage's `_vizAccuracyRgb` ramp, so the same accuracy
+  reads as the same colour in both renderers.
+- **Duet guides** — the ribbon scores and draws the primary voice from
+  `/data`, unchanged. The other voices come from a second, best-effort
+  `/playback` fetch (`_ribbonGuidesFromPayload`) and draw as thin flat bars on
+  the *scored voice's axis*, so a harmony part an octave up stays on the strip
+  instead of drawing off it. `computeSongPitchRange(data, extraMidis)` widens
+  the song-wide range to cover them, percentile-trimming the guides against
+  their own population before unioning the two ranges — pooling every midi
+  into one sort would let a short lead part push the guide range outside the
+  5%/95% window.
+- **Bouncing cue and get-ready countdown** — the same beat estimate
+  (`_vizComputeCueBeat`), the same 0.18 x-smoothing, the same lead-in rule as
+  the stage's lyric band, drawn in the ribbon's text band. Its input is the
+  overlay's existing start-sorted row array, so it is a binary search per
+  frame like the stage's line lookup.
+
+What deliberately did **not** change: mic/note_detect ownership, the
+per-panel splitscreen instance model, and `sungPart` selection — presentation
+only. Nothing here is a mode: guides are additive (empty for a solo pack, a
+lyrics-only song, or a host that can't reach `/playback`), and the cue draws
+from lyric timing alone, so a song with no pitch data still gets the same
+ribbon rather than a visibly different one. Cue state is overlay-local and
+reset per song, so no two panels can move one another's ball.
+
 **#44 removed `visualization` again**, along with `type: "visualization"` —
 see [Manifest scope](#manifest-scope-one-plugin-one-role-since-44). The
 renderer still exists and still runs wherever a consumer installs it; what is

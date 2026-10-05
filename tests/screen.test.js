@@ -4,6 +4,10 @@
  * Covers the cases the issue asks for: create, repeated create, destroy,
  * song switch, failed data load, unsupported host, and two simultaneous
  * instances — plus Auto-mode selection and the payload-shaping helpers.
+ * The tail covers #45, the capabilities the Karaoke button's ribbon absorbs
+ * from the highway renderer (duet guides, the get-ready cue, the shared
+ * accuracy ramp), driven through the real draw with a canvas handed in
+ * directly in place of showOverlay()'s host DOM.
  *
  * No real FeedBack host and no DOM: screen.js is loaded against the stubs
  * below, with its bootstrap guard pre-set so `init()` (which wants a real
@@ -2104,4 +2108,294 @@ test('the summary card can appear at song end while the mic is still live', () =
     }), 2.1);
     assert.ok(ctx.texts.some((t) => t.t === 'SUMMARY'),
         'natural song end should show the finished-take card');
+});
+
+// ── The ribbon absorbs the highway's features inline (#45) ────────────────
+//
+// #32's shape item 2: the EXISTING overlay ribbon grows accuracy tinting,
+// duet guide voices and the bouncing-ball / countdown cue directly, so the
+// Karaoke toggle reads as one thing getting better rather than a swap to a
+// different-looking stage. Nothing here is a mode: the guide list is
+// additive (empty for a solo pack) and the cue draws from the same
+// start-sorted rows the bars do.
+
+test('duet guides are every voice except the scored one, unpitched tokens dropped', () => {
+    const guides = screen._ribbonGuidesFromPayload({
+        schema_version: 1,
+        voices: [
+            { id: 'v1', name: 'Lead', primary: true, tokens: [
+                { start: 1, duration: 0.5, text: 'a', midi: 60 },
+            ] },
+            { id: 'v2', name: 'Harmony', tokens: [
+                { start: 1, duration: 0.5, text: 'a', midi: 72 },
+                { start: 2, duration: 0.5, text: 'b' },          // unpitched: nothing to place
+            ] },
+            { id: 'v3', name: 'Third', tokens: [
+                { start: 1, duration: 0.5, text: 'a', midi: 55 },
+            ] },
+        ],
+    });
+    assert.strictEqual(guides.length, 2);
+    assert.deepStrictEqual(guides.map((g) => g.name), ['Harmony', 'Third']);
+    assert.deepStrictEqual(guides.map((g) => g.colorIndex), [0, 1]);
+    assert.deepStrictEqual(guides[0].tokens, [{ start: 1, duration: 0.5, midi: 72 }]);
+});
+
+test('a solo pack yields no guides at all, rather than a guide for the lead', () => {
+    const solo = screen._ribbonGuidesFromPayload({
+        voices: [{ id: 'primary', primary: true, tokens: [{ start: 1, duration: 1, text: 'a', midi: 60 }] }],
+    });
+    assert.deepStrictEqual(solo, []);
+    assert.deepStrictEqual(screen._ribbonGuidesFromPayload({ voices: [] }), []);
+    assert.deepStrictEqual(screen._ribbonGuidesFromPayload(null), []);
+});
+
+test('guide pitches widen the shared song axis instead of drawing off the strip', () => {
+    const data = { tokens: [
+        { midi: 60 }, { midi: 62 }, { midi: 64 },
+    ] };
+    const leadOnly = screen.computeSongPitchRange(data);
+    const withGuide = screen.computeSongPitchRange(data, [79]);
+    assert.ok(withGuide.hi > leadOnly.hi,
+        `guide must raise the ceiling: ${leadOnly.hi} -> ${withGuide.hi}`);
+    assert.ok(withGuide.lo <= 79 && withGuide.hi >= 79,
+        `the guide pitch must sit inside the strip: ${JSON.stringify(withGuide)}`);
+    // The lead-only contract is unchanged when no guides exist.
+    assert.strictEqual(leadOnly.lo, screen.computeSongPitchRange(data).lo);
+    // Non-numeric / non-finite extras are ignored, not drawn as NaN rows.
+    assert.deepStrictEqual(
+        screen.computeSongPitchRange(data, [null, 'x', NaN, Infinity]),
+        leadOnly,
+    );
+});
+
+// The cue's input is the same start-sorted row array the scorer gets, so
+// these cases are about timing only: which syllable the cue points at.
+const cueRows = [
+    { start: 1.0, duration: 0.5 },
+    { start: 1.5, duration: 0.5 },
+    { start: 2.0, duration: 0.5 },
+    { start: 6.0, duration: 0.5 },   // 3.5s of silence before it
+    { start: 6.5, duration: 0.5 },
+];
+// A phrasing gap: 0.4s between syllables, which must NOT read as a lead-in.
+const shortGapRows = [
+    { start: 1.0, duration: 0.5 },
+    { start: 1.9, duration: 0.5 },
+    { start: 2.4, duration: 0.5 },
+];
+
+test('the cue bounces under the syllable being sung', () => {
+    assert.deepStrictEqual(screen._ribbonCueTarget(cueRows, 1.2), { kind: 'bounce', index: 0 });
+    assert.deepStrictEqual(screen._ribbonCueTarget(cueRows, 1.6), { kind: 'bounce', index: 1 });
+    assert.deepStrictEqual(screen._ribbonCueTarget(cueRows, 6.2), { kind: 'bounce', index: 3 });
+});
+
+test('a phrasing gap rests under the last syllable rather than vanishing', () => {
+    // 1.7s is mid-gap: the ball belongs to the syllable just finished, which
+    // is what the stage renderer's `activeX ?? lastX` fallback does.
+    assert.deepStrictEqual(screen._ribbonCueTarget(shortGapRows, 1.7), { kind: 'bounce', index: 0 });
+});
+
+test('the cue vanishes before the song and after the last syllable', () => {
+    assert.strictEqual(screen._ribbonCueTarget(cueRows, -1), null);
+    assert.strictEqual(screen._ribbonCueTarget([], 1.2), null);
+    assert.strictEqual(screen._ribbonCueTarget(cueRows, 99), null, 'past the last syllable');
+});
+
+test('the cue counts down only over a real silent lead-in', () => {
+    // 3.5s of silence qualifies, and the number counts the seconds left.
+    const cue = screen._ribbonCueTarget(cueRows, 4.0);
+    assert.strictEqual(cue.kind, 'countdown');
+    assert.strictEqual(cue.index, 3);
+    assert.ok(Math.abs(cue.remain - 2.0) < 1e-9);
+    // A 0.4s gap is ordinary phrasing: the ball rests on the previous
+    // syllable instead of counting down.
+    assert.deepStrictEqual(screen._ribbonCueTarget(shortGapRows, 1.7), { kind: 'bounce', index: 0 });
+    // Far too early to count: a long instrumental break shows nothing rather
+    // than a stale number parked on screen.
+    assert.strictEqual(screen._ribbonCueTarget(cueRows, -20), null);
+});
+
+test('the guide lower bound matches a linear scan over the visible window', () => {
+    const tokens = [];
+    for (let i = 0; i < 500; i++) tokens.push({ start: i * 0.5, duration: 0.5, midi: 60 });
+    for (const t of [0, 0.25, 3.5, 100, 249.5]) {
+        const expected = tokens.findIndex((tok) => tok.start >= t);
+        assert.strictEqual(screen._lowerBoundByStart(tokens, t), expected === -1 ? tokens.length : expected,
+            `lower bound at ${t}`);
+    }
+});
+
+// ── The ribbon frame itself ──────────────────────────────────────────────
+//
+// Drives the real drawFrame() with a canvas handed in directly (showOverlay
+// needs host DOM), over song data loaded through the real /status + /data +
+// /playback fetches, so what these assert is what the Karaoke toggle renders.
+
+let ribbonClock = 0;
+
+// Order matters: the canvas is attached AFTER the song loads, because a song
+// change tears the overlay down (resetForNewSong -> teardownOverlay), which
+// is exactly the host-DOM path these tests stand in for.
+function attachRibbon(canvas) {
+    window.highway = {
+        getTime: () => ribbonClock,
+        getLyricsVisible: () => true,
+        setLyricsVisible() {},
+    };
+    const ctx = canvas.getContext('2d');
+    ctx.rects.length = 0;
+    ctx.fills.length = 0;
+    ctx.texts.length = 0;
+    ctx.arcs.length = 0;
+    screen._lkOverlayRender.attachCanvas(canvas, ctx);
+    return ctx;
+}
+
+async function loadRibbonSong(voices) {
+    fetchImpl = (url) => {
+        if (url.includes('/status')) {
+            return jsonFetch({ has_lyrics: true, has_vocals: true, has_pitch: true })();
+        }
+        if (url.includes('/playback')) return jsonFetch({ voices: voices })();
+        // /data — the scored voice, in its own `{t, d, w, midi}` shape.
+        return jsonFetch({
+            filename: 'song.sloppak',
+            tokens: voices[0].tokens.map((tok) => ({
+                t: tok.start, d: tok.duration, w: tok.text,
+                ...(tok.midi === undefined ? {} : { midi: tok.midi }),
+            })),
+        })();
+    };
+    await screen._lkOverlayUi.onSongLoaded({ filename: 'song.sloppak', format: 'sloppak' });
+}
+
+const LEAD_VOICES = [
+    { id: 'v1', name: 'Lead', primary: true, tokens: [
+        { start: 1.0, duration: 0.5, text: 'hel', midi: 60 },
+        { start: 1.5, duration: 0.5, text: 'lo', midi: 62 },
+    ] },
+    { id: 'v2', name: 'Harmony', tokens: [
+        { start: 1.0, duration: 0.5, text: 'hel', midi: 72 },
+        { start: 1.5, duration: 0.5, text: 'lo', midi: 74 },
+    ] },
+];
+
+test('the ribbon draws duet guides under the scored bars on the same axis', async () => {
+    await loadRibbonSong(LEAD_VOICES);
+    assert.strictEqual(screen._lkOverlayRender.voices().length, 1, 'one guide voice');
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 1.2;
+    screen._lkOverlayRender.drawFrame();
+
+    const guideFills = ctx.fills.filter((f) => f === screen.STAGE_VOICE_COLORS[0]);
+    assert.ok(guideFills.length >= 2, 'both harmony syllables are marked');
+    // The scored bars are there too, in their own colours — guides are added
+    // to the same ribbon, never a replacement for it.
+    assert.ok(ctx.fills.includes('#ffe080'), 'the active scored bar is still amber');
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('a solo pack draws the same ribbon with no guides and no guide-only colour', async () => {
+    await loadRibbonSong([LEAD_VOICES[0]]);
+    assert.deepStrictEqual(screen._lkOverlayRender.voices(), []);
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 1.2;
+    screen._lkOverlayRender.drawFrame();
+    for (const color of screen.STAGE_VOICE_COLORS) {
+        assert.ok(!ctx.fills.includes(color), `no ${color} guide fill without a duet`);
+    }
+    // Scored bars and lyrics unchanged — the acceptance criterion that no
+    // visible mode switch appears depending on the song's data.
+    assert.ok(ctx.fills.includes('rgba(120, 80, 230, 0.55)'), 'dim scored bars');
+    assert.ok(ctx.texts.some((t) => t.t === 'hel'));
+    assert.ok(ctx.fills.includes('#ffe080'));
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('the ribbon shows the countdown during a silent lead-in and the ball once singing', async () => {
+    // The cue reads the SCORED voice's syllables — the same rows the bars do —
+    // so the lead-in is a gap in the lead part, with a harmony line over it.
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [
+            { start: 1.0, duration: 0.5, text: 'a', midi: 60 },
+            { start: 6.0, duration: 0.5, text: 'b', midi: 60 },
+        ] },
+        { id: 'v2', tokens: [{ start: 6.0, duration: 0.5, text: 'b', midi: 72 }] },
+    ]);
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    // Mid lead-in: a number counting the seconds to the next syllable.
+    ribbonClock = 4.0;
+    screen._lkOverlayRender.drawFrame();
+    const number = ctx.texts.find((t) => /^\d+\.\d$/.test(t.t));
+    assert.ok(number, 'numeric get-ready countdown: ' + JSON.stringify(ctx.texts.map((t) => t.t)));
+    assert.ok(Math.abs(Number(number.t) - 2.0) < 0.06, `counts down to 2.0, got ${number.t}`);
+    // And the duet guide still draws through the lead-in — one ribbon.
+    assert.ok(ctx.fills.includes(screen.STAGE_VOICE_COLORS[0]), 'guides draw during the lead-in too');
+    // Singing: the ball, and no number.
+    ribbonClock = 6.2;
+    ctx.texts.length = 0;
+    ctx.arcs.length = 0;
+    screen._lkOverlayRender.drawFrame();
+    assert.strictEqual(ctx.arcs.length, 1, 'the bounce ball is drawn once');
+    assert.ok(!ctx.texts.some((t) => /^\d+\.\d$/.test(t.t)), 'no countdown while singing');
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('the cue ball eases toward its target rather than snapping across the strip', async () => {
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [
+            { start: 1.0, duration: 0.5, text: 'a', midi: 60 },
+            { start: 1.5, duration: 0.5, text: 'b', midi: 60 },
+            { start: 2.0, duration: 0.5, text: 'c', midi: 60 },
+        ] },
+    ]);
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 1.2;
+    screen._lkOverlayRender.drawFrame();
+    const first = ctx.arcs[0].x;
+    // Same clock, so the target is unchanged and the ball must hold still —
+    // the smoothing has to be a function of the TARGET's movement, not of
+    // time passing.
+    ctx.arcs.length = 0;
+    screen._lkOverlayRender.drawFrame();
+    assert.strictEqual(ctx.arcs[0].x, first, 'a settled ball does not drift');
+    // The next syllable's text scrolls left past the playhead, so the target
+    // moves with it — and the ball only eases toward that.
+    ribbonClock = 1.95;
+    ctx.arcs.length = 0;
+    screen._lkOverlayRender.drawFrame();
+    const eased = ctx.arcs[0].x;
+    assert.ok(eased < first, 'it moves toward the new syllable, leftward');
+    // Let the same clock settle: that x IS the target the ball was easing
+    // toward, and the eased value must sit short of it rather than on it.
+    for (let i = 0; i < 60; i++) screen._lkOverlayRender.drawFrame();
+    const settled = ctx.arcs[ctx.arcs.length - 1].x;
+    assert.ok(settled < first, 'the target did move');
+    assert.ok(eased > settled, `one frame must not arrive already: ${eased} vs ${settled}`);
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('the ribbon tints sung syllables with the shared accuracy ramp', async () => {
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [{ start: 1.0, duration: 0.5, text: 'a', midi: 60 }] },
+    ]);
+    // Feed the overlay's own scorer a perfect take so the tint layer is live.
+    const frames = [];
+    for (let k = 0; k < 8; k++) frames.push({ t: 1.0 + k * 0.05, midi: 60, rate: 1 });
+    frames.push({ t: 1.6, midi: 60, rate: 1 });   // finalize the syllable
+    for (const frame of frames) screen._lkOverlayOwner.onFrame(frame);
+
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 1.2;
+    screen._lkOverlayRender.drawFrame();
+    const [r, g, b] = screen._vizAccuracyRgb(1);
+    const expected = `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, 0.55)`;
+    assert.ok(ctx.fills.includes(expected),
+        `expected the shared green end of the ramp (${expected}), got ${JSON.stringify(ctx.fills)}`);
+    // A song change is what clears results in production (resetForNewSong);
+    // the tint must not survive into the next song's ribbon.
+    screen._lkOverlayRender.detachCanvas();
+    await screen._lkOverlayUi.onSongLoaded({ filename: 'other.sloppak', format: 'sloppak' });
 });
