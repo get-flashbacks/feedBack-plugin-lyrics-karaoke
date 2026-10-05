@@ -865,11 +865,16 @@
             ctx.font = `bold ${Math.round(fontPx * 1.1)}px sans-serif`;
             ctx.textAlign = 'right';
             ctx.textBaseline = 'top';
+            const label = target.remain.toFixed(1);
             const desired = anchor - fontPx * 1.3;
-            const minX = edgePad;
+            // `textAlign` is 'right', so `numX` is the glyphs' RIGHT edge and
+            // the string extends LEFTWARDS from it. The floor therefore has to
+            // carry the glyph width, or clamping to the bare pad puts the whole
+            // number off the left edge instead of on the strip.
+            const minX = edgePad + ctx.measureText(label).width;
             const maxX = Math.max(edgePad, ribbonCue.ballX - fontPx * 0.4);
             const numX = Math.max(minX, Math.min(desired, maxX));
-            ctx.fillText(target.remain.toFixed(1), numX, baselineY);
+            ctx.fillText(label, numX, baselineY);
         }
 
         const beat = ribbonCue.beat || 0.5;
