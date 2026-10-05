@@ -24,6 +24,15 @@ and the repository's tagged history.
   so a harmony part an octave above the lead stays on the strip.
 - The ribbon's accuracy tint now uses the same red→amber→green ramp as the
   highway renderer, so one accuracy reads as one colour in both.
+- Two cue edge cases found in review, fixed here rather than in a follow-up:
+  the countdown and ball were drawn at the upcoming syllable's own x, which
+  is off the right edge for most of a 2–20s lead-in, so both are now clamped to
+  the strip (the stage renderer clamps its target to the rail for the same
+  reason); and the cue's lookup binary-searched on `start + duration` while
+  the rows are sorted by `start` alone, so a held note overlapping the
+  syllables after it made the search skip the note being sung. The lookup now
+  searches the monotonic `start`, then walks back over the window the longest
+  note can reach.
 - **Version stays 1.13.0.** `version-bumped-on-change` will read this as a
   functional change without a manifest bump, which it is — the gate compares
   against the merge base and cannot see that 1.13.0 has not shipped yet.
