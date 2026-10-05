@@ -59,6 +59,21 @@ function makeCanvas(opts) {
         gradients: [],
         fills: [],
         arcs: [],
+        // Bounding boxes of path-built fills. The rounded bars go through the
+        // path API, so `rects` never sees them; every point `roundFillRect`
+        // emits lies ON the box it is tracing, so the extent of the points is
+        // the shape's real extent.
+        paths: [],
+        _bx0: 0,
+        _by0: 0,
+        _bx1: 0,
+        _by1: 0,
+        _extend(x, y) {
+            if (x < this._bx0) this._bx0 = x;
+            if (y < this._by0) this._by0 = y;
+            if (x > this._bx1) this._bx1 = x;
+            if (y > this._by1) this._by1 = y;
+        },
         clearRect() { this.calls.push('clearRect'); },
         fillRect(x, y, w, h) {
             this.calls.push('fillRect');
@@ -75,13 +90,26 @@ function makeCanvas(opts) {
         closePath() {},
         rect() {},
         clip() {},
-        moveTo() {},
-        lineTo() {},
-        arc(x, y, r) { this.calls.push('arc'); this.arcs.push({ x, y, r }); },
-        arcTo() {},
-        quadraticCurveTo() {},
+        moveTo(x, y) { this._bx0 = x; this._by0 = y; this._bx1 = x; this._by1 = y; },
+        lineTo(x, y) { this._extend(x, y); },
+        arc(x, y, r) {
+            this.calls.push('arc');
+            this.arcs.push({ x, y, r });
+            this._extend(x - r, y - r);
+            this._extend(x + r, y + r);
+        },
+        arcTo(cx, cy, x, y) { this._extend(cx, cy); this._extend(x, y); },
+        quadraticCurveTo(cx, cy, x, y) { this._extend(cx, cy); this._extend(x, y); },
         stroke() { this.calls.push('stroke'); },
-        fill() { this.calls.push('fill'); this.fills.push(this._fill); },
+        fill() {
+            this.calls.push('fill');
+            this.fills.push(this._fill);
+            this.paths.push({
+                x: this._bx0, y: this._by0,
+                w: this._bx1 - this._bx0, h: this._by1 - this._by0,
+                fill: this._fill,
+            });
+        },
         createLinearGradient() {
             const g = { stops: [], addColorStop(o2, c) { this.stops.push([o2, c]); } };
             ctx.gradients.push(g);
@@ -2217,6 +2245,25 @@ test('the cue counts down only over a real silent lead-in', () => {
     assert.strictEqual(screen._ribbonCueTarget(cueRows, -20), null);
 });
 
+// A long instrumental break: 28.5s of silence, of which only the last 20s are
+// worth counting toward. The window is what keeps a stale number off the strip
+// during the rest, so it is pinned at its boundary rather than by a
+// hand-picked value — widening it anywhere makes this go red.
+const longBreakRows = [
+    { start: 1.0, duration: 0.5 },
+    { start: 30.0, duration: 0.5 },
+];
+
+test('the countdown only covers the last 20s of a long instrumental break', () => {
+    // Exactly 20s to go still counts — the window is inclusive.
+    assert.deepStrictEqual(screen._ribbonCueTarget(longBreakRows, 10.0),
+        { kind: 'countdown', index: 1, remain: 20 });
+    // A tenth of a second earlier and the number is gone; the ball rests on
+    // the syllable just finished, exactly as over any other phrasing gap.
+    assert.deepStrictEqual(screen._ribbonCueTarget(longBreakRows, 9.9),
+        { kind: 'bounce', index: 0 });
+});
+
 // The cue's search predicate reads `start + duration` while the rows are
 // sorted by `start` alone, so ends are NOT monotonic: a held note starting
 // first runs past several short syllables that follow it. A binary search on
@@ -2315,6 +2362,7 @@ function attachRibbon(canvas) {
     ctx.fills.length = 0;
     ctx.texts.length = 0;
     ctx.arcs.length = 0;
+    ctx.paths.length = 0;
     screen._lkOverlayRender.attachCanvas(canvas, ctx);
     return ctx;
 }
@@ -2347,6 +2395,57 @@ const LEAD_VOICES = [
         { start: 1.5, duration: 0.5, text: 'lo', midi: 74 },
     ] },
 ];
+
+// A two-minute guide line against a single scored syllable, so the guide
+// window has 120 tokens to cull rather than two.
+const LONG_GUIDE_TOKENS = [];
+for (let i = 0; i < 120; i++) {
+    LONG_GUIDE_TOKENS.push({ start: i, duration: 0.5, text: 'g', midi: 72 });
+}
+const LONG_GUIDE_VOICES = [
+    { id: 'v1', name: 'Lead', primary: true, tokens: [
+        { start: 10.0, duration: 0.5, text: 'a', midi: 60 },
+    ] },
+    { id: 'v2', name: 'Harmony', tokens: LONG_GUIDE_TOKENS },
+];
+
+test('guide bars draw only the visible window of a long song', async () => {
+    await loadRibbonSong(LONG_GUIDE_VOICES);
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 10.0;
+    screen._lkOverlayRender.drawFrame();
+
+    // The visible window at 10s is [10 - 0.18*6 - 0.5, 10 + 0.82*6 + 0.5] =
+    // [8.42, 15.42], so the guide tokens at 9..15s are the ones on screen —
+    // seven of the 120. A guide walk that forgot to stop at the right edge
+    // would paint all 111 that follow the lower bound.
+    const drawn = ctx.fills.filter((f) => f === screen.STAGE_VOICE_COLORS[0]).length;
+    assert.strictEqual(drawn, 7, `expected only the 7 visible guide bars, drew ${drawn}`);
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('guide bars are thinner than the scored bar and centred on it', async () => {
+    // A guide marks where the other part goes for timing; drawn as thick as
+    // the voice being sung it would compete with the thing the eye follows.
+    // Both parts share a midi here so they land on the same lane and the two
+    // bars can be compared directly.
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [{ start: 1.0, duration: 0.5, text: 'a', midi: 60 }] },
+        { id: 'v2', tokens: [{ start: 1.0, duration: 0.5, text: 'a', midi: 60 }] },
+    ]);
+    const ctx = attachRibbon(makeCanvas({ width: 800, height: 140 }));
+    ribbonClock = 1.2;
+    screen._lkOverlayRender.drawFrame();
+
+    const guide = ctx.paths.find((p) => p.fill === screen.STAGE_VOICE_COLORS[0]);
+    const scored = ctx.paths.find((p) => p.fill === 'rgba(120, 80, 230, 0.55)');
+    assert.ok(guide && scored, `expected both shapes, got ${JSON.stringify(ctx.paths)}`);
+    assert.ok(guide.h < scored.h,
+        `a guide bar must be thinner than the scored one: ${guide.h} vs ${scored.h}`);
+    assert.ok(guide.y > scored.y && guide.y + guide.h < scored.y + scored.h,
+        `a guide bar must sit inside the scored one: y ${guide.y}..${guide.y + guide.h} vs ${scored.y}..${scored.y + scored.h}`);
+    screen._lkOverlayRender.detachCanvas();
+});
 
 test('the ribbon draws duet guides under the scored bars on the same axis', async () => {
     await loadRibbonSong(LEAD_VOICES);
