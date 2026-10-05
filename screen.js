@@ -704,6 +704,17 @@
         return lo;
     }
 
+    /** Longest duration in a start-sorted row/token array. The cue backs its
+     *  window up by this much so a held note that started long before `now`
+     *  is still found. */
+    function _ribbonMaxDuration(rows) {
+        let max = 0;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].duration > max) max = rows[i].duration;
+        }
+        return max;
+    }
+
     // ── Get-ready cue (#45) ─────────────────────────────────────────────
     //
     // Karaoke Highway's phase-2 cue, adapted to the flat ribbon's geometry:
@@ -715,7 +726,7 @@
     // `ribbonCue` is the overlay's own animation state (the smoothed ball x
     // and the beat estimate), reset on every song change so a new song never
     // inherits a position from the last one.
-    const ribbonCue = { beat: 0.5, ballX: null };
+    const ribbonCue = { beat: 0.5, ballX: null, maxDuration: 0 };
 
     function _ribbonCueReset() {
         // A stable, song-level tempo estimate (median syllable spacing) so
@@ -723,79 +734,110 @@
         // the same helper, as the stage renderer.
         ribbonCue.beat = _vizComputeCueBeat(_lkOverlayRows);
         ribbonCue.ballX = null;
+        ribbonCue.maxDuration = _ribbonMaxDuration(_lkOverlayRows);
     }
 
     /** Which syllable the cue belongs to right now, from the start-sorted
      *  token rows. Pure over its arguments so it can be unit-tested without a
      *  canvas, and returns null when there is nothing to cue (before the
-     *  first syllable, past the last, or in a short gap where the stage
-     *  renderer likewise shows no ball). */
-    function _ribbonCueTarget(rows, now) {
+     *  first syllable, or past the last).
+     *
+     *  The lookup CANNOT binary-search on `start + duration`: `rows` is
+     *  sorted by `start` alone, and ends are not monotonic in that order — a
+     *  long held note starting first ends after several short syllables that
+     *  follow it, so an end-time predicate would skip straight past the note
+     *  being sung. (The stage's `_vizActiveLyricLineIndex` gets away with it
+     *  because its `lines` are sorted by `t1`, which does make ends
+     *  monotonic; that property is lost in this port.) So: binary-search the
+     *  monotonic `start` for the next syllable, then scan back only as far as
+     *  the longest note can reach — a row still active at `now` must start
+     *  after `now - maxDuration` — and take the earliest such row, matching
+     *  the stage's "first line not yet finished" rule.
+     *
+     *  `maxDuration` is the song's longest note; callers pass the cached
+     *  value, and it is derived here when omitted (tests, or a song whose
+     *  tokens changed under an un-reset cue). */
+    function _ribbonCueTarget(rows, now, maxDuration) {
         if (!rows || !rows.length) return null;
-        // First row not yet finished. `rows` is start-sorted, so this is a
-        // binary search — the whole point of keeping a sorted copy rather
-        // than rescanning pitchData.tokens (whose order /data doesn't
-        // promise) every frame.
+        const lookback = typeof maxDuration === 'number' && maxDuration > 0
+            ? maxDuration
+            : _ribbonMaxDuration(rows);
+        // First row starting after `now` — the syllable still to come.
         let lo = 0;
         let hi = rows.length;
         while (lo < hi) {
             const mid = (lo + hi) >> 1;
-            if (now >= rows[mid].start + rows[mid].duration + 0.05) lo = mid + 1;
-            else hi = mid;
+            if (rows[mid].start > now) hi = mid;
+            else lo = mid + 1;
         }
-        const i = lo;
-        const tok = rows[i];
-        if (!tok) return null;
-        if (tok.start > now) {
-            const remain = tok.start - now;
-            // A gap before the FIRST syllable is measured from zero; every
-            // other gap from the syllable just finished.
-            const gapStart = i > 0 ? rows[i - 1].start + rows[i - 1].duration : 0;
-            const gap = i > 0 ? tok.start - gapStart : tok.start;
-            if (gap >= RIBBON_CUE_LEADIN_MIN_S && remain <= RIBBON_CUE_COUNTDOWN_MAX_S) {
-                return { kind: 'countdown', index: i, remain };
-            }
-            // An ordinary phrasing gap: the ball rests under the syllable just
-            // finished, which is what the stage's `activeX ?? lastX` fallback
-            // does. Before the very first syllable there is nothing to rest
-            // under, so there is no ball at all.
-            return i > 0 ? { kind: 'bounce', index: i - 1 } : null;
+        const next = lo < rows.length ? lo : -1;
+        // Earliest row still sounding at `now`, within the reachable window.
+        // The whole window is walked rather than returning on the first hit:
+        // several rows can sound at once, and "first line not yet finished" is
+        // the EARLIEST of them, so the cue must not land on an ornament that
+        // starts inside a held note. With no row starting after `now` (the tail
+        // of the song) the walk starts at the last row.
+        let sounding = -1;
+        for (let i = (next < 0 ? rows.length : next) - 1; i >= 0; i--) {
+            // Nothing older can still sound: every row at or before this one
+            // starts no later, and no row lasts longer than the lookback.
+            if (rows[i].start <= now - lookback) break;
+            if (now >= rows[i].start && now < rows[i].start + rows[i].duration) sounding = i;
         }
-        // `tok.start <= now` here (the countdown branch handled the rest), so
-        // this row is either the active syllable or already finished with the
-        // next one not due yet — an ordinary short gap. In the gap case the
-        // ball rests under the last finished syllable rather than vanishing,
-        // matching the stage's `info.activeX ?? info.lastX` fallback.
-        const active = now < tok.start + tok.duration;
-        return { kind: 'bounce', index: active ? i : Math.max(0, i - 1) };
+        if (sounding >= 0) return { kind: 'bounce', index: sounding };
+        if (next < 0) return null;
+        const tok = rows[next];
+        const remain = tok.start - now;
+        // A gap before the FIRST syllable is measured from zero; every other
+        // gap from the syllable just finished.
+        const gap = next > 0 ? tok.start - (rows[next - 1].start + rows[next - 1].duration) : tok.start;
+        if (gap >= RIBBON_CUE_LEADIN_MIN_S && remain <= RIBBON_CUE_COUNTDOWN_MAX_S) {
+            return { kind: 'countdown', index: next, remain };
+        }
+        // An ordinary phrasing gap: the ball rests under the syllable just
+        // finished, which is what the stage's `activeX ?? lastX` fallback
+        // does. Before the very first syllable there is nothing to rest
+        // under, so there is no ball at all.
+        return next > 0 ? { kind: 'bounce', index: next - 1 } : null;
     }
 
     /** The bounce ball / countdown, drawn in the ribbon's text band (#45).
      *  `textBandTop` is the y the syllable text starts at. Mirrors the stage
      *  renderer's cue: the same x-smoothing factor, the same sine bounce
      *  phase against the syllable's own start, the same colours. */
-    function drawRibbonCue(now, xFor, textBandTop, dpr) {
+    function drawRibbonCue(now, xFor, textBandTop, dpr, W) {
         const rows = _lkOverlayRows;
-        const target = _ribbonCueTarget(rows, now);
+        const target = _ribbonCueTarget(rows, now, ribbonCue.maxDuration);
         if (!target) {
             ribbonCue.ballX = null;
             return;
         }
         const tok = rows[target.index];
         const cx = (xFor(tok.start) + xFor(tok.start + tok.duration)) / 2;
-        ribbonCue.ballX = ribbonCue.ballX === null ? cx : ribbonCue.ballX + (cx - ribbonCue.ballX) * 0.18;
+        // A syllable still several seconds away sits off the right edge for
+        // most of a long lead-in, so the countdown has to stay on the strip.
+        // The stage clamps its target to the rail for the same reason; here it
+        // clamps to just right of the playhead, so the number reads as "time
+        // until the next syllable" and the ball eases onto the word itself as
+        // it scrolls in.
+        const edgePad = 4 * dpr;
+        const cxClamped = Math.max(edgePad, Math.min(cx, W - edgePad));
+        ribbonCue.ballX = ribbonCue.ballX === null
+            ? cxClamped
+            : ribbonCue.ballX + (cxClamped - ribbonCue.ballX) * 0.18;
 
         const fontPx = RIBBON_TEXT_FONT_PX * dpr;
         const baselineY = textBandTop + 4 * dpr;
 
         if (target.kind === 'countdown') {
-            // The number sits to the LEFT of the syllable it counts down to,
-            // so it never covers the word about to be sung.
+            // The number sits to the LEFT of the cue, so it never covers the
+            // word about to be sung.
             ctx.fillStyle = 'rgba(120,210,255,0.95)';
             ctx.font = `bold ${Math.round(fontPx * 1.1)}px sans-serif`;
             ctx.textAlign = 'right';
             ctx.textBaseline = 'top';
-            ctx.fillText(target.remain.toFixed(1), ribbonCue.ballX - fontPx * 0.6, baselineY);
+            const numX = Math.max(edgePad, ribbonCue.ballX - fontPx * 0.6);
+            ctx.fillText(target.remain.toFixed(1), numX, baselineY);
         }
 
         const beat = ribbonCue.beat || 0.5;
@@ -903,7 +945,7 @@
             }
         }
 
-        drawRibbonCue(now, xFor, barTop + barBand, dpr);
+        drawRibbonCue(now, xFor, barTop + barBand, dpr, W);
 
         // Mic-feedback overlays — only when the user has been singing.
         if (_lkOverlayScorer.hasResults() || overlayMicState() === 'listening') {
@@ -4847,6 +4889,7 @@
             // #45: the ribbon absorbed the highway's inline capabilities
             _ribbonGuidesFromPayload,
             _ribbonCueTarget,
+            _ribbonMaxDuration,
             _lowerBoundByStart,
             STAGE_VOICE_COLORS,
             _vizAccuracyRgb,

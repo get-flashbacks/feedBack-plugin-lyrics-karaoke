@@ -2217,6 +2217,72 @@ test('the cue counts down only over a real silent lead-in', () => {
     assert.strictEqual(screen._ribbonCueTarget(cueRows, -20), null);
 });
 
+// The cue's search predicate reads `start + duration` while the rows are
+// sorted by `start` alone, so ends are NOT monotonic: a held note starting
+// first runs past several short syllables that follow it. A binary search on
+// an end-time predicate walks straight past the note being sung.
+test('the cue finds a held note that overlaps the syllables after it', () => {
+    const overlapping = [
+        { start: 1.0, duration: 8.0 },   // one long note...
+        { start: 2.0, duration: 0.2 },
+        { start: 2.2, duration: 0.2 },
+        { start: 2.4, duration: 0.2 },
+    ];
+    // The linear answer at 2.3s is the long note; an end-time binary search
+    // returned row 2 and cued the wrong syllable.
+    assert.deepStrictEqual(screen._ribbonCueTarget(overlapping, 2.3), { kind: 'bounce', index: 0 });
+    // ...and it stays correct as the short syllables come and go beneath it.
+    assert.deepStrictEqual(screen._ribbonCueTarget(overlapping, 2.1), { kind: 'bounce', index: 0 });
+    assert.deepStrictEqual(screen._ribbonCueTarget(overlapping, 2.45), { kind: 'bounce', index: 0 });
+    // Once it releases and nothing else sounds, there is no cue at all.
+    assert.strictEqual(screen._ribbonCueTarget(overlapping, 9.1), null,
+        'the held note ended at 9.0 and no later syllable is due');
+    // With a syllable 9.4s later, that gap is a real lead-in, so the cue
+    // switches to counting down to it rather than resting on the tail.
+    const withTail = overlapping.concat([{ start: 12.0, duration: 0.5 }]);
+    const tail = screen._ribbonCueTarget(withTail, 9.1);
+    assert.strictEqual(tail.kind, 'countdown');
+    assert.strictEqual(tail.index, 4);
+    assert.ok(Math.abs(tail.remain - 2.9) < 1e-9, `counts down to 2.9, got ${tail.remain}`);
+});
+
+test('the cue target matches a linear scan across a whole song, overlaps included', () => {
+    // Property check rather than a hand-picked case: build a song with long
+    // held notes overlapping later short ones, then compare the cue against a
+    // brute-force "first row still sounding" scan at every timestep.
+    const rows = [];
+    let t = 0.5;
+    for (let i = 0; i < 60; i++) {
+        // Every 7th syllable is held for 3s, so it overlaps what follows.
+        const duration = (i % 7 === 0) ? 3.0 : 0.3;
+        rows.push({ start: t, duration });
+        t += 0.35;
+    }
+    const maxDuration = screen._ribbonMaxDuration(rows);
+    for (let now = 0.1; now < t + 4; now += 0.1) {
+        const expected = rows.findIndex((r) => now >= r.start && now < r.start + r.duration);
+        const got = screen._ribbonCueTarget(rows, now, maxDuration);
+        if (expected >= 0) {
+            assert.ok(got, `no cue at ${now} but row ${expected} sounds`);
+            assert.strictEqual(got.kind, 'bounce', `wrong kind at ${now}`);
+            assert.strictEqual(got.index, expected, `wrong row at ${now}`);
+        }
+    }
+});
+
+test('the cue never walks more than the reachable window back', () => {
+    // The lookbehind is what keeps the cue O(notes within the longest hold)
+    // rather than O(song). Assert the helper it derives that from.
+    const rows = [{ start: 0, duration: 2 }, { start: 1, duration: 2 }, { start: 5, duration: 1 }];
+    assert.strictEqual(screen._ribbonMaxDuration(rows), 2);
+    assert.strictEqual(screen._ribbonMaxDuration([]), 0);
+    // A note starting long before `now` but still sounding is still found,
+    // because the walk is backed up by exactly that much.
+    const long = [{ start: 0, duration: 10 }, { start: 9.5, duration: 0.2 }];
+    assert.strictEqual(screen._ribbonMaxDuration(long), 10);
+    assert.deepStrictEqual(screen._ribbonCueTarget(long, 9.8), { kind: 'bounce', index: 0 });
+});
+
 test('the guide lower bound matches a linear scan over the visible window', () => {
     const tokens = [];
     for (let i = 0; i < 500; i++) tokens.push({ start: i * 0.5, duration: 0.5, midi: 60 });
@@ -2340,6 +2406,33 @@ test('the ribbon shows the countdown during a silent lead-in and the ball once s
     screen._lkOverlayRender.drawFrame();
     assert.strictEqual(ctx.arcs.length, 1, 'the bounce ball is drawn once');
     assert.ok(!ctx.texts.some((t) => /^\d+\.\d$/.test(t.t)), 'no countdown while singing');
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('the countdown stays on the strip through a long lead-in', async () => {
+    // 18s of silence: the next syllable is far off the right edge for most of
+    // it, so an unclamped cue would draw its number and ball off-canvas.
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [
+            { start: 1.0, duration: 0.5, text: 'a', midi: 60 },
+            { start: 19.0, duration: 0.5, text: 'b', midi: 60 },
+        ] },
+    ]);
+    const W = 800;
+    const ctx = attachRibbon(makeCanvas({ width: W, height: 140 }));
+    for (const now of [3.0, 8.0, 14.0, 18.5]) {
+        ribbonClock = now;
+        ctx.texts.length = 0;
+        ctx.arcs.length = 0;
+        screen._lkOverlayRender.drawFrame();
+        const number = ctx.texts.find((t) => /^\d+\.\d$/.test(t.t));
+        assert.ok(number, `a countdown is expected at ${now}s`);
+        assert.ok(number.x >= 0 && number.x <= W,
+            `countdown drawn off-canvas at ${now}s: x=${number.x}`);
+        assert.strictEqual(ctx.arcs.length, 1, `one ball at ${now}s`);
+        assert.ok(ctx.arcs[0].x >= 0 && ctx.arcs[0].x <= W,
+            `ball drawn off-canvas at ${now}s: x=${ctx.arcs[0].x}`);
+    }
     screen._lkOverlayRender.detachCanvas();
 });
 
