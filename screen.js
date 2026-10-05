@@ -845,12 +845,17 @@
 
         if (target.kind === 'countdown') {
             // The number sits to the LEFT of the cue, so it never covers the
-            // word about to be sung.
+            // word about to be sung. Anchor to the syllable's left edge (same
+            // rule as the stage renderer) to avoid overlapping the centred word.
             ctx.fillStyle = 'rgba(120,210,255,0.95)';
             ctx.font = `bold ${Math.round(fontPx * 1.1)}px sans-serif`;
             ctx.textAlign = 'right';
             ctx.textBaseline = 'top';
-            const numX = Math.max(edgePad, ribbonCue.ballX - fontPx * 0.6);
+            const tokLeft = xFor(tok.start);
+            const desired = tokLeft - fontPx * 1.3;
+            const minX = edgePad;
+            const maxX = Math.max(edgePad, ribbonCue.ballX - fontPx * 0.4);
+            const numX = Math.max(minX, Math.min(desired, maxX));
             ctx.fillText(target.remain.toFixed(1), numX, baselineY);
         }
 

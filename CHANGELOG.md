@@ -34,11 +34,11 @@ and the repository's tagged history.
   searches the monotonic `start`, then walks back over the window the longest
   note can reach.
 - **Version stays 1.13.0.** `version-bumped-on-change` will read this as a
-  functional change without a manifest bump, which it is — the gate compares
-  against the merge base and cannot see that 1.13.0 has not shipped yet.
-  #45 is a step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
-  and joins #44 in that one release; see the standalone-release note below.
-  Resolve the red check at merge rather than bumping twice for one release.
+  diff that touches functional code (`screen.js`) without bumping
+  `plugin.json`. That check is intentionally allowed to remain red for this
+  PR because the combined release of #44 and #45 has not shipped yet — the
+  version bump belongs with the release, not with each intermediate
+  sub-issue. (Note: `plugin.json` was also left at 1.13.0 in commit `41163a3` for #44.) No functional behavior changes.
 
 ### Changed
 
