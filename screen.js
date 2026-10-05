@@ -851,14 +851,27 @@
 
         if (target.kind === 'countdown') {
             // The number sits to the LEFT of the cue, so it never covers the
-            // word about to be sung. Anchor to the syllable's left edge (same
-            // rule as the stage renderer) to avoid overlapping the centred word.
+            // word about to be sung. Anchor to that word's own left edge — the
+            // same measured `x0` the stage renderer takes — rather than to the
+            // syllable's bar edge: the text is drawn centred on the syllable's
+            // midpoint, so a word wider than its own bar reaches further left
+            // than the bar does and the number lands inside the glyphs.
+            // `_lkOverlayRows` carries no text, so the word is read back off
+            // the source token list by index.
+            const srcTok = (pitchData && Array.isArray(pitchData.tokens))
+                ? pitchData.tokens[tok.i]
+                : null;
+            const word = srcTok ? syllableText(srcTok) : '';
+            let anchor = xFor(tok.start);
+            if (word) {
+                ctx.font = `${Math.round(fontPx)}px sans-serif`;
+                anchor = cx - ctx.measureText(word).width / 2;
+            }
             ctx.fillStyle = 'rgba(120,210,255,0.95)';
             ctx.font = `bold ${Math.round(fontPx * 1.1)}px sans-serif`;
             ctx.textAlign = 'right';
             ctx.textBaseline = 'top';
-            const tokLeft = xFor(tok.start);
-            const desired = tokLeft - fontPx * 1.3;
+            const desired = anchor - fontPx * 1.3;
             const minX = edgePad;
             const maxX = Math.max(edgePad, ribbonCue.ballX - fontPx * 0.4);
             const numX = Math.max(minX, Math.min(desired, maxX));
