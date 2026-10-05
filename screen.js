@@ -737,6 +737,43 @@
         ribbonCue.maxDuration = _ribbonMaxDuration(_lkOverlayRows);
     }
 
+    /** Index of the first row starting strictly after `now`, or the row count
+     *  when none does. Binary search on `start`, the one key the rows are
+     *  actually sorted by. */
+    function _ribbonFirstStartingAfter(rows, now) {
+        let lo = 0;
+        let hi = rows.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (rows[mid].start > now) hi = mid;
+            else lo = mid + 1;
+        }
+        return lo;
+    }
+
+    /** Index of the EARLIEST row still sounding at `now`, or -1. Walks back
+     *  from the first row that has yet to start, over the window the song's
+     *  longest note can reach — bounded, so this stays O(notes within the
+     *  longest hold) rather than O(song). */
+    function _ribbonSoundingIndex(rows, now, next, lookback) {
+        let sounding = -1;
+        for (let i = Math.min(next, rows.length) - 1; i >= 0; i--) {
+            // Nothing older can still sound: every row at or before this one
+            // starts no later, and no row lasts longer than the lookback.
+            if (rows[i].start <= now - lookback) break;
+            if (now >= rows[i].start && now < rows[i].start + rows[i].duration) sounding = i;
+        }
+        return sounding;
+    }
+
+    /** How long the pause before `rows[index]` is, measured from zero when it
+     *  is the very first syllable and from the syllable just finished
+     *  otherwise. */
+    function _ribbonGapBefore(rows, index) {
+        const from = index > 0 ? rows[index - 1].start + rows[index - 1].duration : 0;
+        return rows[index].start - from;
+    }
+
     /** Which syllable the cue belongs to right now, from the start-sorted
      *  token rows. Pure over its arguments so it can be unit-tested without a
      *  canvas, and returns null when there is nothing to cue (before the
@@ -748,11 +785,9 @@
      *  follow it, so an end-time predicate would skip straight past the note
      *  being sung. (The stage's `_vizActiveLyricLineIndex` gets away with it
      *  because its `lines` are sorted by `t1`, which does make ends
-     *  monotonic; that property is lost in this port.) So: binary-search the
-     *  monotonic `start` for the next syllable, then scan back only as far as
-     *  the longest note can reach — a row still active at `now` must start
-     *  after `now - maxDuration` — and take the earliest such row, matching
-     *  the stage's "first line not yet finished" rule.
+     *  monotonic; that property is lost in this port.) Hence the split below:
+     *  binary-search the monotonic `start`, then walk back over the longest
+     *  note's reach.
      *
      *  `maxDuration` is the song's longest note; callers pass the cached
      *  value, and it is derived here when omitted (tests, or a song whose
@@ -762,36 +797,15 @@
         const lookback = typeof maxDuration === 'number' && maxDuration > 0
             ? maxDuration
             : _ribbonMaxDuration(rows);
-        // First row starting after `now` — the syllable still to come.
-        let lo = 0;
-        let hi = rows.length;
-        while (lo < hi) {
-            const mid = (lo + hi) >> 1;
-            if (rows[mid].start > now) hi = mid;
-            else lo = mid + 1;
-        }
-        const next = lo < rows.length ? lo : -1;
-        // Earliest row still sounding at `now`, within the reachable window.
-        // The whole window is walked rather than returning on the first hit:
-        // several rows can sound at once, and "first line not yet finished" is
-        // the EARLIEST of them, so the cue must not land on an ornament that
-        // starts inside a held note. With no row starting after `now` (the tail
-        // of the song) the walk starts at the last row.
-        let sounding = -1;
-        for (let i = (next < 0 ? rows.length : next) - 1; i >= 0; i--) {
-            // Nothing older can still sound: every row at or before this one
-            // starts no later, and no row lasts longer than the lookback.
-            if (rows[i].start <= now - lookback) break;
-            if (now >= rows[i].start && now < rows[i].start + rows[i].duration) sounding = i;
-        }
+        const next = _ribbonFirstStartingAfter(rows, now);
+        // Anything still sounding wins over a countdown, including a held note
+        // that the next syllable merely overlaps.
+        const sounding = _ribbonSoundingIndex(rows, now, next, lookback);
         if (sounding >= 0) return { kind: 'bounce', index: sounding };
-        if (next < 0) return null;
-        const tok = rows[next];
-        const remain = tok.start - now;
-        // A gap before the FIRST syllable is measured from zero; every other
-        // gap from the syllable just finished.
-        const gap = next > 0 ? tok.start - (rows[next - 1].start + rows[next - 1].duration) : tok.start;
-        if (gap >= RIBBON_CUE_LEADIN_MIN_S && remain <= RIBBON_CUE_COUNTDOWN_MAX_S) {
+        if (next >= rows.length) return null;
+        const remain = rows[next].start - now;
+        if (_ribbonGapBefore(rows, next) >= RIBBON_CUE_LEADIN_MIN_S
+            && remain <= RIBBON_CUE_COUNTDOWN_MAX_S) {
             return { kind: 'countdown', index: next, remain };
         }
         // An ordinary phrasing gap: the ball rests under the syllable just
