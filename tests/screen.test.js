@@ -86,7 +86,17 @@ function makeCanvas(opts) {
         measureText(t) { return { width: String(t).length * 6 }; },
         save() { this.calls.push('save'); },
         restore() { this.calls.push('restore'); },
-        beginPath() {},
+        // A new path starts with no points at all, so the box opens as an
+        // empty set. Resetting to 0,0,0,0 would still make every later point
+        // grow the box from the canvas origin; the infinities let the first
+        // point of the path establish the real extent, which is what a
+        // beginPath() + arc() + fill() shape (the cue ball) needs.
+        beginPath() {
+            this._bx0 = Infinity;
+            this._by0 = Infinity;
+            this._bx1 = -Infinity;
+            this._by1 = -Infinity;
+        },
         closePath() {},
         rect() {},
         clip() {},
