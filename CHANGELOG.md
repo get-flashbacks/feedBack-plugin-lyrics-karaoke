@@ -24,6 +24,12 @@ and the repository's tagged history.
   so a harmony part an octave above the lead stays on the strip.
 - The ribbon's accuracy tint now uses the same red→amber→green ramp as the
   highway renderer, so one accuracy reads as one colour in both.
+- **Version stays 1.13.0.** `version-bumped-on-change` will read this as a
+  functional change without a manifest bump, which it is — the gate compares
+  against the merge base and cannot see that 1.13.0 has not shipped yet.
+  #45 is a step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
+  and joins #44 in that one release; see the standalone-release note below.
+  Resolve the red check at merge rather than bumping twice for one release.
 
 ### Changed
 
