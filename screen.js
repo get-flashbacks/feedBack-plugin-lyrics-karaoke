@@ -754,7 +754,12 @@
     /** Index of the EARLIEST row still sounding at `now`, or -1. Walks back
      *  from the first row that has yet to start, over the window the song's
      *  longest note can reach — bounded, so this stays O(notes within the
-     *  longest hold) rather than O(song). */
+     *  longest hold) rather than O(song).
+     *
+     *  Precondition: `lookback` must be the longest duration in `rows` (i.e.
+     *  `_ribbonMaxDuration(rows)`). The break below assumes nothing outlives
+     *  it, so a caller passing a SMALLER window does not degrade to a slower
+     *  scan — it stops early and silently misses long held notes. */
     function _ribbonSoundingIndex(rows, now, next, lookback) {
         let sounding = -1;
         for (let i = Math.min(next, rows.length) - 1; i >= 0; i--) {
@@ -799,7 +804,8 @@
             : _ribbonMaxDuration(rows);
         const next = _ribbonFirstStartingAfter(rows, now);
         // Anything still sounding wins over a countdown, including a held note
-        // that the next syllable merely overlaps.
+        // that the next syllable merely overlaps. The lookback is the song's
+        // longest note, which is what makes that walk's early stop sound.
         const sounding = _ribbonSoundingIndex(rows, now, next, lookback);
         if (sounding >= 0) return { kind: 'bounce', index: sounding };
         if (next >= rows.length) return null;
