@@ -2213,8 +2213,10 @@ test('the cue counts down only over a real silent lead-in', () => {
     // syllable instead of counting down.
     assert.deepStrictEqual(screen._ribbonCueTarget(shortGapRows, 1.7), { kind: 'bounce', index: 0 });
     // Far too early to count: a long instrumental break shows nothing rather
-    // than a stale number parked on screen.
-    assert.strictEqual(screen._ribbonCueTarget(cueRows, -20), null);
+    // than a stale number parked on screen. The syllable has to be far enough
+    // ahead to be rejected by the cap ALONE, not by the pre-song fallback.
+    assert.strictEqual(screen._ribbonCueTarget([{ start: 30, duration: 0.5 }], 1.0), null,
+        '29s out is past RIBBON_CUE_COUNTDOWN_MAX_S');
 });
 
 // The cue's search predicate reads `start + duration` while the rows are
