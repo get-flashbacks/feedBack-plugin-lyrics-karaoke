@@ -2537,6 +2537,58 @@ test('the countdown stays on the strip through a long lead-in', async () => {
     screen._lkOverlayRender.detachCanvas();
 });
 
+test('the countdown clears the word it is counting down to', async () => {
+    // The number is drawn right-aligned, so it occupies [x - width, x] — which
+    // means an x that is comfortably inside the canvas can still have half the
+    // number hanging off the left edge, and an anchor on the syllable's CENTRE
+    // paints it straight over the word as soon as that word is on screen.
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [
+            { start: 1.0, duration: 0.5, text: 'a', midi: 60 },
+            { start: 6.0, duration: 0.5, text: 'wonderful', midi: 60 },
+        ] },
+    ]);
+    const W = 800;
+    const ctx = attachRibbon(makeCanvas({ width: W, height: 140 }));
+    ribbonClock = 4.0;
+    screen._lkOverlayRender.drawFrame();
+
+    const number = ctx.texts.find((t) => /^\d+\.\d$/.test(t.t));
+    const word = ctx.texts.find((t) => t.t === 'wonderful');
+    assert.ok(number && word,
+        'countdown and word: ' + JSON.stringify(ctx.texts.map((t) => t.t)));
+    // The word is centred on its bar's midpoint, so its leftmost glyph is half
+    // its measured width left of that. The number's right edge has to clear it.
+    const wordLeft = word.x - ctx.measureText('wonderful').width / 2;
+    assert.ok(number.x <= wordLeft,
+        `countdown covers the word: number right edge ${number.x}, word starts ${wordLeft}`);
+    screen._lkOverlayRender.detachCanvas();
+});
+
+test('the countdown keeps its glyphs on a narrow canvas', async () => {
+    // On a narrow strip the playhead sits close to the left edge, so a word due
+    // in a fraction of a second puts the number's anchor left of the pad. The
+    // floor has to carry the glyph width, or the whole label leaves the canvas.
+    await loadRibbonSong([
+        { id: 'v1', primary: true, tokens: [
+            { start: 2.0, duration: 0.5, text: 'elephant', midi: 60 },
+        ] },
+    ]);
+    const W = 200;
+    const ctx = attachRibbon(makeCanvas({ width: W, height: 140 }));
+    ribbonClock = 1.7;
+    screen._lkOverlayRender.drawFrame();
+
+    const number = ctx.texts.find((t) => /^\d+\.\d$/.test(t.t));
+    assert.ok(number, 'a countdown is expected just before the syllable: '
+        + JSON.stringify(ctx.texts.map((t) => t.t)));
+    const glyphs = ctx.measureText(number.t).width;
+    assert.ok(number.x - glyphs >= 0,
+        `countdown glyphs off the left edge: spans ${number.x - glyphs}..${number.x}`);
+    assert.ok(number.x <= W, `countdown off the right edge: x=${number.x}`);
+    screen._lkOverlayRender.detachCanvas();
+});
+
 test('the cue ball eases toward its target rather than snapping across the strip', async () => {
     await loadRibbonSong([
         { id: 'v1', primary: true, tokens: [
