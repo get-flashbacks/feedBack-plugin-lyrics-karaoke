@@ -851,18 +851,36 @@
 
         if (target.kind === 'countdown') {
             // The number sits to the LEFT of the cue, so it never covers the
-            // word about to be sung. Anchor to the syllable's left edge (same
-            // rule as the stage renderer) to avoid overlapping the centred word.
+            // word about to be sung. Anchor to that word's own left edge — the
+            // same measured `x0` the stage renderer takes — rather than to the
+            // syllable's bar edge: the text is drawn centred on the syllable's
+            // midpoint, so a word wider than its own bar reaches further left
+            // than the bar does and the number lands inside the glyphs.
+            // `_lkOverlayRows` carries no text, so the word is read back off
+            // the source token list by index.
+            const srcTok = (pitchData && Array.isArray(pitchData.tokens))
+                ? pitchData.tokens[tok.i]
+                : null;
+            const word = srcTok ? syllableText(srcTok) : '';
+            let anchor = xFor(tok.start);
+            if (word) {
+                ctx.font = `${Math.round(fontPx)}px sans-serif`;
+                anchor = cx - ctx.measureText(word).width / 2;
+            }
             ctx.fillStyle = 'rgba(120,210,255,0.95)';
             ctx.font = `bold ${Math.round(fontPx * 1.1)}px sans-serif`;
             ctx.textAlign = 'right';
             ctx.textBaseline = 'top';
-            const tokLeft = xFor(tok.start);
-            const desired = tokLeft - fontPx * 1.3;
-            const minX = edgePad;
+            const label = target.remain.toFixed(1);
+            const desired = anchor - fontPx * 1.3;
+            // `textAlign` is 'right', so `numX` is the glyphs' RIGHT edge and
+            // the string extends LEFTWARDS from it. The floor therefore has to
+            // carry the glyph width, or clamping to the bare pad puts the whole
+            // number off the left edge instead of on the strip.
+            const minX = edgePad + ctx.measureText(label).width;
             const maxX = Math.max(edgePad, ribbonCue.ballX - fontPx * 0.4);
             const numX = Math.max(minX, Math.min(desired, maxX));
-            ctx.fillText(target.remain.toFixed(1), numX, baselineY);
+            ctx.fillText(label, numX, baselineY);
         }
 
         const beat = ribbonCue.beat || 0.5;
