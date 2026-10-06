@@ -277,6 +277,123 @@
 
     // ── Button wiring ──────────────────────────────────────────────────
 
+    let fullscreenBtn = null;
+    let _fullscreenActive = false;
+
+    function ensureFullscreenButton() {
+        if (fullscreenBtn) return;
+        const micPill = document.getElementById('btn-karaoke-mic-pill');
+        const anchor = micPill && micPill.parentNode ? micPill : (document.getElementById('btn-karaoke-mic'));
+        if (!anchor || !anchor.parentNode) return;
+        fullscreenBtn = document.createElement('button');
+        fullscreenBtn.id = 'btn-karaoke-fullscreen';
+        fullscreenBtn.type = 'button';
+        fullscreenBtn.disabled = false;
+        fullscreenBtn.className = BTN_CLASS_PROMPT;
+        fullscreenBtn.textContent = 'Fullscreen';
+        fullscreenBtn.title = 'Fullscreen karaoke view';
+        fullscreenBtn.setAttribute('aria-pressed', 'false');
+        fullscreenBtn.setAttribute('aria-label', 'Fullscreen karaoke view');
+        fullscreenBtn.addEventListener('click', onFullscreenClick);
+        anchor.parentNode.insertBefore(fullscreenBtn, anchor.nextSibling);
+        fullscreenBtn.style.display = 'none';
+    }
+
+    function refreshFullscreenButton() {
+        if (!fullscreenBtn) return;
+        const sloppak = isSloppakSong(currentSong);
+        if (!sloppak) {
+            fullscreenBtn.style.display = 'none';
+            return;
+        }
+        fullscreenBtn.style.display = '';
+
+        // If highway.setRenderer doesn't exist, can't use fullscreen
+        const hasSetRenderer = (typeof window !== 'undefined' && window.highway && typeof window.highway.setRenderer === 'function');
+        if (!hasSetRenderer) {
+            fullscreenBtn.disabled = false;
+            fullscreenBtn.className = BTN_CLASS_PROMPT;
+            fullscreenBtn.textContent = 'Fullscreen';
+            fullscreenBtn.title = 'Fullscreen karaoke view';
+            fullscreenBtn.setAttribute('aria-pressed', 'false');
+            return;
+        }
+
+        // If main highway not visible
+        const mainVisible = (typeof window !== 'undefined' && window.highway && typeof window.highway.isVisible === 'function') ? window.highway.isVisible() : true;
+        if (!mainVisible) {
+            fullscreenBtn.style.display = 'none';
+            return;
+        }
+
+        if (_vizOwnsPlayback() && !_fullscreenActive) {
+            fullscreenBtn.disabled = false;
+            fullscreenBtn.className = BTN_CLASS_PROMPT;
+            fullscreenBtn.textContent = 'Fullscreen';
+            fullscreenBtn.title = 'Visualization provider owns playback for this song in another panel';
+            fullscreenBtn.setAttribute('aria-pressed', 'false');
+            return;
+        }
+
+        if (_fullscreenActive) {
+            fullscreenBtn.disabled = false;
+            fullscreenBtn.className = BTN_CLASS_ACTIVE;
+            fullscreenBtn.textContent = 'Fullscreen ✓';
+            fullscreenBtn.title = 'Exit fullscreen karaoke view';
+            fullscreenBtn.setAttribute('aria-pressed', 'true');
+        } else {
+            fullscreenBtn.disabled = false;
+            fullscreenBtn.className = BTN_CLASS_PROMPT;
+            fullscreenBtn.textContent = 'Fullscreen';
+            fullscreenBtn.title = 'Fullscreen karaoke view';
+            fullscreenBtn.setAttribute('aria-pressed', 'false');
+        }
+    }
+
+
+    function onFullscreenClick() {
+        if (_fullscreenActive) {
+            _fullscreenExit();
+        } else {
+            _fullscreenEnter();
+        }
+    }
+
+    function _fullscreenEnter() {
+        if (_fullscreenActive) return;
+        const hasSetRenderer = (typeof window !== 'undefined' && window.highway && typeof window.highway.setRenderer === 'function');
+        if (!hasSetRenderer) return;
+        const factory = (typeof window !== 'undefined' && (window.feedBackViz_lyrics_karaoke || window.slopsmithViz_lyrics_karaoke));
+        if (!factory) return;
+        let renderer = null;
+        if (typeof factory === 'function') {
+            renderer = factory();
+        } else if (factory.createRenderer) {
+            renderer = factory.createRenderer();
+        }
+        if (!renderer) return;
+        if (renderer.pluginId === undefined) renderer.pluginId = 'lyrics_karaoke';
+        if (renderer.source === undefined) renderer.source = 'lyrics_karaoke';
+        try {
+            window.highway.setRenderer(renderer);
+        } catch (e) { /* ignore */ }
+        _fullscreenActive = true;
+        refreshFullscreenButton();
+        refreshButtonState();
+    }
+
+    function _fullscreenExit() {
+        if (!_fullscreenActive) return;
+        const hasSetRenderer = (typeof window !== 'undefined' && window.highway && typeof window.highway.setRenderer === 'function');
+        try {
+            if (hasSetRenderer) window.highway.setRenderer(null);
+        } catch (e) { /* ignore */ }
+        _fullscreenActive = false;
+        refreshFullscreenButton();
+        refreshButtonState();
+    }
+
+
     function ensureToggleButton() {
         if (toggleBtn) return;
         const lyricsBtn = document.getElementById('btn-lyrics');
@@ -299,6 +416,7 @@
         // only surfaces while karaoke mode is active. Inject it now so
         // the button order is stable; refreshMicUi() handles visibility.
         ensureMicButton();
+        ensureFullscreenButton();
     }
 
     function refreshButtonState() {
@@ -306,6 +424,7 @@
         // Mic UI tracks the karaoke toggle's eligibility — keep them
         // updated together so toggling/hiding can't desync.
         refreshMicUi();
+        refreshFullscreenButton();
     }
 
     function refreshKaraokeToggle() {
@@ -2223,6 +2342,7 @@
         if (overlayMicState() !== 'off') stopMic({ keepFlag: true });
         micWantOnForSong = false;
         resetUserResults();
+        if (_fullscreenActive) { _fullscreenExit(); }
         refreshButtonState();
     }
 
@@ -2811,6 +2931,7 @@
                 const ret = origShowScreen.apply(this, arguments);
                 _playerScreenActive = name === 'player';
                 if (name !== 'player') {
+                    if (_fullscreenActive) _fullscreenExit();
                     if (karaokeMode) setKaraokeMode(false);
                     teardownOverlay();
                     // setKaraokeMode(false) already stops the mic when
@@ -4976,6 +5097,12 @@
                 // ever sets, so a peer that blocks every start can never
                 // make that precondition true and the toggle can't cover it.
                 startMic,
+            },
+            _fullscreenUi: {
+                ensureFullscreenButton,
+                refreshFullscreenButton,
+                onFullscreenClick,
+                isActive: () => _fullscreenActive,
             },
             // #45: a seam onto the ribbon's own draw. showOverlay() builds the
             // canvas from real host DOM (#player/#highway), which no stub here
