@@ -4,6 +4,11 @@ Lyrics Karaoke prepares synced lyrics and vocal pitch for a song, then shows
 them in FeedBack's vocals highway during playback. The plugin id remains
 `lyrics_karaoke`; existing prepared songs do not need regeneration.
 
+New users: start with the [user guide](docs/user-guide.md) — it covers
+installation, preparing and playing songs, microphone privacy and
+calibration, duets and splitscreen, fallback, and troubleshooting. This
+README stays focused on fork differences and development.
+
 ## Why choose the get-flashbacks edition?
 
 Choose this edition if you want singing to run on FeedBack's own highway.
