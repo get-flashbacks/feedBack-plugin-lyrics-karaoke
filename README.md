@@ -7,7 +7,8 @@ them in FeedBack's vocals highway during playback. The plugin id remains
 New users: start with the [user guide](docs/user-guide.md) — it covers
 installation, preparing and playing songs, microphone privacy and
 calibration, duets and splitscreen, fallback, and troubleshooting. This
-README stays focused on fork differences and development.
+README keeps the shorter reference: requirements, core compatibility,
+migration status, troubleshooting, and development notes.
 
 ## Why choose the get-flashbacks edition?
 
@@ -132,9 +133,11 @@ channel selectors support a default mic or a multichannel interface; the
 scoring-panel selector chooses which vocals panel owns the microphone in
 splitscreen. Only one panel can own it at a time. If an older Note Detect that
 cannot hand off ownership is installed, the mic is not started at all and the
-control stays visible but disabled with the upgrade reason. Closing the panel, changing
-song or part, or stopping capture releases the stream. Audio is analyzed in
-the plugin for pitch; raw audio is not stored or transmitted.
+control stays visible but disabled with the upgrade reason. Changing song
+or part, stopping capture, or closing the panel releases the stream; a
+hidden splitscreen panel is the exception — it keeps the device open and
+resumes capture when shown again. Audio is analyzed in the plugin for
+pitch; raw audio is not stored or transmitted.
 
 **Microphone feedback**, **Octave-free pitch match**, **Pitch tolerance**,
 **Mic timing offset**, **Sung part**, and **Left rail** are renderer settings
