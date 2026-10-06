@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# npm devDependencies (eslint) — installed by `npm ci`, never committed.
+node_modules/

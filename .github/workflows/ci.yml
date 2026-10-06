@@ -31,6 +31,18 @@ jobs:
         run: |
           node --check screen.js
           for file in tests/*.test.js; do node --check "$file"; done
+      - name: Install lint tooling
+        run: npm ci
+      # `npm test` is duplicated with the shared `ci` job above, deliberately:
+      # that job runs tests/*.test.js itself, but it lives in an org-owned
+      # workflow pinned to @main, which can change without notice. This job is
+      # this repo's own gate, so the suite that protects this plugin runs where
+      # this repo can see it fail. The one thing worth adding here is lint,
+      # which nothing else runs.
+      - name: JavaScript lint
+        run: npm run lint
+      - name: JavaScript tests
+        run: npm test
       - name: Generate synthetic packs
         run: python tests/fixtures/generate_feedpaks.py "$RUNNER_TEMP/vocals-fixtures"
       - name: Upload synthetic packs for manual testing
