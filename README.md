@@ -165,10 +165,17 @@ back to a compatible Lyrics Karaoke release.
 ## Development and provenance
 
 Install test dependencies with
-`python -m pip install pytest fastapi pyyaml httpx`, then run
-`python -m pytest -q tests` and
-`node --test tests/screen.test.js tests/vocal-engine.test.js` from this
-directory. `python tests/fixtures/generate_feedpaks.py OUTPUT_DIR` creates
+`python -m pip install pytest fastapi pyyaml httpx` and `npm ci`, then run
+`python -m pytest -q tests`, `npm test` and `npm run lint` from this
+directory. ESLint 10 needs Node 20.19+, 22.13+ or 24+, which is what
+`actions/setup-node` with `node-version: '22'` resolves to in CI. `npm test` is `node --test tests/*.test.js` — the renderer and
+overlay suites, the microphone engine, and `tests/host-contract.test.js`,
+which exercises the seam against a stubbed host: registration through
+`highway.setRenderer()`, two panels sharing one bus and one microphone,
+re-executing `screen.js` on plugin reload, payloads that fail or arrive late,
+and teardown that leaves no scheduled frame and no live track. `npm run lint`
+is ESLint over `screen.js` and those suites; nothing in `node_modules/` ships
+with the plugin. `python tests/fixtures/generate_feedpaks.py OUTPUT_DIR` creates
 four packs with synthetic tone audio for route and host smoke tests; the
 generator needs `pyyaml`. CI also uploads them as a `vocals-synthetic-packs`
 artifact for manual testing.

@@ -43,6 +43,26 @@ and the repository's tagged history.
 
 ### Changed
 
+- The release gate now checks the JavaScript it already shipped, not just its
+  syntax ([#41](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/41),
+  fourth step of [#17](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/17)).
+  `vocals-release-gate` runs `npm ci`, `eslint .` and the full `node --test`
+  suite alongside the existing `node --check`, so a lint error or a failing
+  host-contract test fails CI on the PR that causes it instead of surfacing
+  in the next release. `eslint.config.mjs` is the whole rule set —
+  `js.configs.recommended` across `screen.js`, the test suites and the config
+  itself, with two rules new in ESLint 10 exempted for `screen.js` alone until
+  its three pre-existing sites are cleaned up in a functional PR. Nothing is
+  added to the plugin's runtime: `package.json` is `private`, `node_modules/`
+  is ignored, and nothing in it is published or loaded by the host.
+- A new `tests/host-contract.test.js` covers the seam between this plugin and
+  a live host: registration through `highway.setRenderer()`, two panels
+  sharing one event bus and one microphone, re-executing `screen.js` on plugin
+  reload without splitting the playback-ownership ledger, an unloadable
+  payload that must never throw out of `draw()` (core reverts to the default
+  highway after three throwing draws, overwriting the user's saved viz), and
+  teardown that leaves no scheduled animation frame, no live track and no
+  panel still subscribed to `highway:visibility`.
 - Lyrics Karaoke is no longer a separate visualization-picker entry
   ([#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44),
   first step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)).
