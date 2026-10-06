@@ -801,9 +801,8 @@ Both directions of this port stay AGPL-3.0:
 
 Everything below ships. Two suites run from a clean checkout with no
 copyrighted media: **130 pytest cases and 215 `node --test` cases**, both
-green at the commit this section was written for (`python -m pytest -q
-tests`, `npm test`). Re-measure rather than trusting the numbers — they
-move with every follow-up PR.
+green on this branch (`python -m pytest -q tests`, `npm test`). Re-measure
+rather than trusting the numbers — they move with every follow-up PR.
 
 The pattern is content-free, synthesized fixtures (no real song or lyric
 content committed), established by `tests/test_playback_payload.py` and
@@ -828,8 +827,9 @@ extended everywhere else:
   network error), hostile host shapes (no event bus, a canvas locked to
   another context type), two instances rendering independently from their own
   payloads, plugin re-execution, and the note_detect coexistence gate — no
-  real FeedBack host required, mirroring how Karaoke Highway's own `tests/`
-  stub FastAPI rather than spin up a server. It also pins the stage and
+  real FeedBack host required, for the same reason Karaoke Highway's own
+  `tests/` stub FastAPI instead of spinning up a server. It also pins the
+  stage and
   ribbon draw output itself (lanes, slabs, duet guides, cue and countdown,
   accuracy ramp) against a recording fake context.
 - **Microphone and scoring (JavaScript).** `tests/vocal-engine.test.js` covers
