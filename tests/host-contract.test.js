@@ -331,6 +331,7 @@ beforeEach(async () => {
     frames.cancelled.length = 0;
     media.gum = 0;
     media.tracks.length = 0;
+    gumFailNext = false;
     HOST_DOM.player.children.length = 0;
     HOST_DOM.highway.children.length = 0;
     await resetOverlay();
@@ -600,10 +601,11 @@ test('the host stub reverts a renderer that keeps throwing, as core would', () =
     // reverted" could mean the stub never reverts anything — which would make
     // that assertion true of any plugin, broken or not.
     const hw = makeHighway(makeCanvas({}), bundle());
-    hw.setRenderer({ draw() { throw new Error('boom'); }, destroy() {} });
+    const throwing = { draw() { throw new Error('boom'); }, destroy() {} };
+    hw.setRenderer(throwing);
     hw.frame(1.0);
     hw.frame(2.0);
-    assert.strictEqual(hw.current, hw.current, 'two strikes is not a revert');
+    assert.strictEqual(hw.current, throwing, 'two strikes is not a revert');
     hw.frame(3.0);
     assert.strictEqual(hw.reverted.reason, 'draw-failure');
     assert.strictEqual(hw.current, null, 'and the host dropped the renderer');
@@ -637,7 +639,7 @@ test('an unloadable payload never throws out of draw, so the host never reverts'
         // this the assertion below would run before a single retry existed.
         await flush();
         assert.strictEqual(bus.of('lyrics_karaoke:renderer-failed').length, 1,
-            'still no second announcement after 8 frames');
+            'still no second announcement after 16 frames');
         assert.strictEqual(fetches.length, 1, 'and no retry fetch either');
     } finally {
         renderer.destroy();
