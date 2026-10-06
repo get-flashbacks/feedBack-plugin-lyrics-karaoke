@@ -93,10 +93,10 @@ lead still sits on the strip.
 
 Click the shared **🎤** control only when you want to be scored. With the
 microphone listening you get a live trace of the pitch you sang at the
-playhead, a red→amber→green accuracy tint on what you have sung, and a
-status readout showing the current note, accuracy, and streak
-(`F4 · 92% · ×5`-style). The **Karaoke** button and the ribbon work with no
-microphone whatsoever.
+playhead and a red→amber→green accuracy tint on what you have sung. The
+readout beside 🎤 shows the note you are singing; the highway renderer
+extends it with accuracy and streak (`F4 · 92% · ×5`-style). The
+**Karaoke** button and the ribbon work with no microphone whatsoever.
 
 Microphone scoring has one state machine you can see in the control:
 
@@ -104,21 +104,32 @@ Microphone scoring has one state machine you can see in the control:
 | --- | --- |
 | Off | 🎤 idle; lyrics and ribbon keep running |
 | Requesting | The browser asks for permission once |
-| Listening | Live trace, tint, and note/accuracy/streak readout |
-| Suspended | Audio context needs a click: an inline "Click 🎤 again" message |
-| Blocked | Disabled with the reason inline (denied permission, device busy, older Note Detect) |
-| Device lost | Capture stops, error appears; reconnect and click 🎤 again |
+| Listening | Live trace and accuracy tint; the readout beside 🎤 shows the note name, plus accuracy and streak on the renderer |
+| Paused | The renderer panel went hidden while capture was on: the readout says `paused`, the device stays open, and capture resumes by itself when the panel is shown again |
+| Busy | Disabled — another panel or plugin already holds the microphone |
+| Blocked | Disabled with the Note Detect reason shown; 1.15.2 or newer is required |
+| Error | Capture stopped with the reason shown — permission denied, no microphone, device in use, device disconnected, or an audio context that would not start ("Audio is suspended. Click 🎤 again."). Click 🎤 to retry |
 
 ## Settings
 
-Karaoke is deliberately low-control. What you control directly:
+Karaoke is deliberately low-control. The **🎤** control is the one thing
+both paths share: it starts and stops capture, and it is the only path to
+the microphone.
 
-- **🎤** — starts and stops capture. The only path to the microphone.
+Three more controls belong to the highway renderer only. Since 1.13.0 the
+only route to that renderer is through splitscreen — a panel that already
+had Lyrics Karaoke saved as its visualization (see the README's migration
+note) — and these controls are built only while such a panel is mounted:
+
 - **Microphone input** — a default-mic or multichannel picker; the saved
   device is re-selected when present and otherwise falls back safely.
 - **Capture channel** — **Mix**, **Ch 1**, or **Ch 2** for stereo interfaces.
-- **Scoring panel** (splitscreen only) — which vocals panel the microphone
-  scores; only one panel can own it at a time.
+- **Scoring panel** — which vocals panel the microphone scores; only one
+  panel can own it at a time.
+
+On the **Karaoke**-button ribbon there are no pickers: the mic keeps
+whichever device and channel were last saved (the default device and Mix
+until something sets them).
 
 What the renderer runs on internally (you normally do not touch these):
 **Microphone feedback** (on),
@@ -138,10 +149,13 @@ Re-homing them into the karaoke UI is the remainder of
 requests it on load, on song change, or from a restored setting, and
 permission can be denied without stopping lyric playback. Audio is captured,
 analyzed for pitch in the plugin's own code, then dropped: raw audio is
-never stored or transmitted. Closing the panel, changing song or sung part,
-or stopping capture releases the browser stream. In splitscreen only one
-panel owns the microphone at a time, and the shared 🎤 control is the only
-way in or out.
+never stored or transmitted. Changing song or sung part, stopping capture,
+or closing the panel releases the browser stream. The one exception is a
+splitscreen panel that goes hidden: it keeps the device open, pauses
+capture, and resumes by itself when the panel is shown again — the 🎤
+control stays active until you stop it or close the panel. In splitscreen
+only one panel owns the microphone at a time, and the shared 🎤 control is
+the only way in or out.
 
 **Calibration.** Scoring compares the pitch you sing with the target at the
 playhead. Two knobs adjust for round-trip delay and your voice:
@@ -190,7 +204,7 @@ the same song packs when rolling back.
 | Song does not resolve on an old host | A song pack that is a symlink pointing outside the library is refused by the pre-`0dcc913` fallback; update the host. |
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
-| Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
+| Wrong input or channel | The device and Mix / Ch 1 / Ch 2 pickers live on the renderer's mic row, reachable only from a saved Lyrics Karaoke splitscreen panel (see [Settings](#settings)); the **Karaoke**-button ribbon reuses the saved device and channel. Reconnect a missing device and start capture again. |
 | Microphone says busy or unavailable | Another application or panel holds the device. Release it, then click 🎤 again. |
 | The 🎤 control is disabled | An older Note Detect (< 1.15.2) is installed; update Note Detect and click 🎤 again. |
 | Voice appears late or early | Calibrate with the mic timing offset (see above); the control returns with the rest of #32. |
@@ -206,7 +220,7 @@ this documents the shot list, not final captures. Generate copyright-free
 test media with
 `python tests/fixtures/generate_feedpaks.py OUTPUT_DIR` (or grab the
 `vocals-synthetic-packs` CI artifact) so no private songs appear, then
-capture and attach to `docs/screenshots/`:
+capture the states below:
 
 | State | Show |
 | --- | --- |
@@ -219,10 +233,10 @@ capture and attach to `docs/screenshots/`:
 | Narrow panel | Same states at a narrow splitscreen width |
 | Two vocals panels | Separate per-panel state, mic owned by one |
 
-The same states, with privacy notes (strip player names, private song
-titles, and microphone device names before sharing), are the screenshot
-evidence rows in
-[docs/release-manual-matrix.md](release-manual-matrix.md).
+Attach the captures to the release PR and link them from
+[docs/release-manual-matrix.md](release-manual-matrix.md), whose
+screenshot section is the evidence gate for release. Strip player names,
+private song titles, and microphone device names before sharing.
 
 ## License and source credit
 
