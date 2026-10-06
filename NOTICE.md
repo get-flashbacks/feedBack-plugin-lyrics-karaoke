@@ -24,5 +24,8 @@ this plugin on these dates:
   `screen.js`, so the ribbon and the stage present the same features.
 
 The corresponding source files retain comments identifying the adapted
-sections and their origin. The complete source for this version is available
+sections and their origin, with one known exception: the ribbon's duet
+guides block in `screen.js` (`// ── Duet guides (#45)`) does not yet name
+Karaoke Highway. That origin comment is deferred to the release PR that
+performs the version bump. The complete source for this version is available
 in the [get-flashbacks repository](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke).
