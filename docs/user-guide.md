@@ -131,16 +131,38 @@ On the **Karaoke**-button ribbon there are no pickers: the mic keeps
 whichever device and channel were last saved (the default device and Mix
 until something sets them).
 
-What the renderer runs on internally (you normally do not touch these):
-**Microphone feedback** (on),
-**Octave-free pitch match** (off), **Pitch tolerance** (1 semitone),
-**Mic timing offset** (0 ms), **Sung part** (`primary` voice),
-**Left rail** (`absolute` scale). These descriptors are not declared in the
-manifest as of 1.13.0, so no host renders controls for them, and
-tolerance/octave-free/timing follow this plugin's own stored engine
-preferences — a calibrated value from before 1.13.0 keeps applying with no
-control.
-Re-homing them into the karaoke UI is the remainder of
+### Settings with no control today
+
+Six more settings exist in the renderer. **None of them has a control in
+1.13.0** — they are listed so you know the defaults, which ones are shared,
+and where a stored value lives:
+
+| Setting | Default | Scope |
+| --- | --- | --- |
+| **Pitch tolerance** | 1 semitone | shared engine preference — every panel and the legacy overlay start from it |
+| **Octave-free pitch match** | off | shared engine preference |
+| **Mic timing offset** | 0 ms | shared engine preference |
+| **Microphone feedback** | on | per panel; the renderer's mic row reads it |
+| **Sung part** | `primary` voice | per panel |
+| **Left rail** | `absolute` scale | per panel |
+
+The three engine preferences are one document in `localStorage` under the
+key `lyrics_karaoke.prefs.v1`. On first load, when that document does not
+exist yet, compatible values are copied across **once** from Karaoke
+Highway's `vocals_highway.*` keys (tolerance, octave-free matching, mic
+timing, microphone device and channel), so a calibration done there keeps
+applying; its old microphone-on bit is deliberately not carried, because
+capture still starts only on a click. The overlay's own on/off bit,
+`lyrics_karaoke.micFeedback`, is a separate key it has always owned.
+
+**A fresh install has no in-app way to change any of these.** The manifest
+stopped declaring them in 1.13.0, so no host renders a control for them and
+nothing calls the renderer's settings API — every panel starts from the
+defaults above (the three engine ones read out of `lyrics_karaoke.prefs.v1`).
+Editing that document in the browser console changes the three engine
+preferences for panels opened afterwards; the three panel-scoped settings
+have no reachable setter at all, so **sung part stays on the primary voice**.
+Re-homing these into the karaoke UI is the remainder of
 [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
 
 ## Microphone privacy and calibration
@@ -158,25 +180,33 @@ only one panel owns the microphone at a time, and the shared 🎤 control is
 the only way in or out.
 
 **Calibration.** Scoring compares the pitch you sing with the target at the
-playhead. Two knobs adjust for round-trip delay and your voice:
+playhead. Two values compensate for round-trip delay and your voice:
 
-- **Mic timing offset** (±1000 ms) calibrates the hear → sing → capture
-  loop. Raise it if you register consistently late — Bluetooth audio and
+- **Mic timing offset** (±1000 ms) covers the hear → sing → capture loop.
+  Raise it if you register consistently late — Bluetooth audio and
   wireless mics add delay the plugin cannot measure. It re-dates incoming
-  mic frames only; playback and drawing are untouched. Sing along on time
-  and adjust until your trace sits on the note bars. Currently a stored
-  value with no control (see [Settings](#settings)).
-- **Pitch tolerance** (semitones) and **Octave-free pitch match** loosen
-  matching: tolerance widens the accepted band around the target note,
-  octave-free accepts your own convenient octave. Same story — engine
-  preference while #32 is unfinished.
+  mic frames only; playback and drawing are untouched.
+- **Pitch tolerance** (semitones) widens the accepted band around the target
+  note, and **Octave-free pitch match** accepts your own convenient octave.
+
+Both are engine preferences with no control in 1.13.0. They are stored in
+`lyrics_karaoke.prefs.v1` and start at the defaults in
+[Settings](#settings-with-no-control-today), so today the honest
+instruction is: judge the default against a short take, and if it does not
+fit, edit the stored value in the browser console and reopen the panel. A
+control returns with the remainder of
+[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
 
 ## Duets and splitscreen
 
 **Duets.** A pack with `vocal_tracks` carries separate voices. All parts
-draw on one ribbon — the sung part as note slabs, the others as thin guide
-bars. Switching sung part switches what you are scored on and re-anchors
-state locally; results never carry over between parts.
+draw on one ribbon — the scored voice as note slabs, the others as thin
+guide bars — on one song-wide pitch axis. As of 1.13.0 the scored voice is
+always the **primary** one: the **Sung part** setting still exists and still
+re-anchors scoring state locally when it changes, but nothing renders a
+control for it (see [Settings](#settings-with-no-control-today)), so there
+is no in-app way to switch to a second part yet. That returns with
+[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
 
 **Splitscreen.** Every panel owns its renderer and its state; nothing is
 shared through module globals, so two vocals panels cannot overwrite each
@@ -207,7 +237,7 @@ the same song packs when rolling back.
 | Wrong input or channel | The device and Mix / Ch 1 / Ch 2 pickers live on the renderer's mic row, reachable only from a saved Lyrics Karaoke splitscreen panel (see [Settings](#settings)); the **Karaoke**-button ribbon reuses the saved device and channel. Reconnect a missing device and start capture again. |
 | Microphone says busy or unavailable | Another application or panel holds the device. Release it, then click 🎤 again. |
 | The 🎤 control is disabled | An older Note Detect (< 1.15.2) is installed; update Note Detect and click 🎤 again. |
-| Voice appears late or early | Calibrate with the mic timing offset (see above); the control returns with the rest of #32. |
+| Voice appears late or early | There is no calibration control in 1.13.0: edit the mic timing offset in `lyrics_karaoke.prefs.v1` (see [Settings](#settings-with-no-control-today)) and reopen the panel. |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; malformed packs are reported separately from missing ones. |
 | Session score looks stale | Play/pause/seek/song-switch are all pinned; if anything survives a transport change, report it. |
 

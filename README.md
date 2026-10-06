@@ -142,10 +142,16 @@ pitch; raw audio is not stored or transmitted.
 **Microphone feedback**, **Octave-free pitch match**, **Pitch tolerance**,
 **Mic timing offset**, **Sung part**, and **Left rail** are renderer settings
 whose descriptors used to live in `plugin.json`. That block is gone as of
-1.13.0, so no host renders controls for them: **Pitch tolerance**,
-**Octave-free pitch match**, and **Mic timing offset** take the engine
-preferences, and the rest run on their defaults. Re-homing them into the
-karaoke UI is the next part of
+1.13.0, so **no host renders a control for any of them**: every panel runs
+on the defaults (tolerance 1 semitone, octave-free off, mic offset 0 ms,
+microphone feedback on, sung part `primary`, left rail `absolute`).
+Tolerance, octave-free matching and mic offset are one shared document in
+`localStorage` under `lyrics_karaoke.prefs.v1`, seeded once from Karaoke
+Highway's `vocals_highway.*` keys when it does not exist yet, so a
+calibration done there still applies; a fresh install with neither has no
+in-app way to change them, and microphone feedback, sung part and left rail
+have no reachable setter at all. Re-homing them into the karaoke UI is the
+next part of
 [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
 
 ## Fallback, migration, and rollback
@@ -167,7 +173,7 @@ back to a compatible Lyrics Karaoke release.
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
-| Voice appears late or early | Scoring runs on the engine's mic offset; a control for it returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
+| Voice appears late or early | Scoring runs on the engine's mic offset. There is no control for it in 1.13.0 — edit the value in `lyrics_karaoke.prefs.v1` (see the user guide's [Settings](docs/user-guide.md#settings-with-no-control-today) section); a control returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; the renderer reports malformed packs separately from missing ones. |
 
 ## Development and provenance
