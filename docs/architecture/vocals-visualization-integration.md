@@ -799,27 +799,61 @@ Both directions of this port stay AGPL-3.0:
 
 ## Testing strategy
 
-`tests/test_playback_payload.py` already establishes the pattern to extend:
-content-free, synthesized fixtures (no real song/lyric content committed),
-covering one-singer-complete-pitch, lyrics-only, invalid numeric values,
-malformed manifest paths, missing side files, and legacy-shaped files.
-Dependent issues should follow the same style:
+Everything below ships. Two suites run from a clean checkout with no
+copyrighted media: **130 pytest cases and 215 `node --test` cases**, both
+green on this branch (`python -m pytest -q tests`, `npm test`). Re-measure
+rather than trusting the numbers — they move with every follow-up PR.
 
-- #14 (provider registration): stub-host tests for create, repeated
-  create, destroy, song switch, failed data load, unsupported host, two
-  simultaneous instances — no real FeedBack host required, mirroring how
-  Karaoke Highway's own `tests/` stub FastAPI rather than spin up a server.
-- #11 (mic/scoring consolidation): `tests/vocal-engine.test.js` — pure
-  unit tests for YIN helpers, octave-free distance, tolerance boundaries,
-  timing offsets, seek-back reset, scoring aggregation and prefs
-  migration, plus the mic controller against a fake media environment
-  (exclusivity, permission denial, device fallback/loss, suspend/resume,
-  live device/channel switch, full teardown) and the provider↔mic wiring.
-  No live microphone needed.
-- #16 (duet/splitscreen): two-vocal-part fixtures using `vocal_tracks`,
-  independent panel selection, a shared scale, and teardown coverage.
-- Full CI/manual-matrix gate lives in #17's Definition of Done; this
-  document does not duplicate that checklist.
+The pattern is content-free, synthesized fixtures (no real song or lyric
+content committed), established by `tests/test_playback_payload.py` and
+extended everywhere else:
+
+- **Route and payload contract (Python).** `tests/test_playback_payload.py`
+  pins the canonical `/playback` shape — token sanitization, the pitch join,
+  arrangement identity, HTTP status mapping — by grabbing the route's raw
+  callable instead of standing up a server. `tests/test_generated_feedpaks.py`
+  drives the same routes over the four packs that
+  `tests/fixtures/generate_feedpaks.py` generates (single voice, duet,
+  incomplete pitch, lyrics-only), which is also the only sanctioned way to
+  get real `.sloppak` fixtures. `tests/test_helpers.py` covers the manifest,
+  lyric-token, pitch-file, job-lock and LRC helpers, `tests/test_host_compat.py`
+  the host-compat branches (simulated `dlc_paths` / `safepath` modules injected
+  into `sys.modules`, covering both host shapes and a host that ships neither),
+  `tests/test_lrc_nonfinite.py` the LRC timestamp edge. `tests/playback_schema.py`
+  is the shared schema assertion, not a test module.
+- **Provider registration and lifecycle (JavaScript).** `tests/screen.test.js`
+  stubs the host globals and drives factory registration, repeated init,
+  destroy, song and arrangement switches, failed payload loads (404, 422 and
+  network error), hostile host shapes (no event bus, a canvas locked to
+  another context type), two instances rendering independently from their own
+  payloads, plugin re-execution, and the note_detect coexistence gate — no
+  real FeedBack host required, for the same reason Karaoke Highway's own
+  `tests/` stub FastAPI instead of spinning up a server. It also pins the
+  stage and
+  ribbon draw output itself (lanes, slabs, duet guides, cue and countdown,
+  accuracy ramp) against a recording fake context.
+- **Microphone and scoring (JavaScript).** `tests/vocal-engine.test.js` covers
+  the YIN helpers, octave-free distance, tolerance boundaries, timing offsets,
+  seek-back reset, scoring aggregation and prefs migration, plus the mic
+  controller against a fake media environment (exclusivity, permission
+  denial, device fallback/loss, suspend/resume, live device/channel switch,
+  full teardown) and the provider↔mic wiring. No live microphone needed.
+- **Host seam (JavaScript).** `tests/host-contract.test.js` pins registration
+  through `highway.setRenderer()`, the host's own revert paths, re-executing
+  `screen.js` on plugin reload keeping one factory and one ownership ledger,
+  per-panel visibility listeners, payloads that arrive after teardown being
+  dropped, and teardown that leaves no scheduled frame and no live track.
+- **CI.** `.github/workflows/ci.yml` calls the org's shared reusable workflow
+  for the suites themselves, and adds a repo-local `vocals-release-gate` job
+  (`compileall`, `ruff`, `node --check`, `npm ci`, `eslint`, `npm test`) plus
+  a `vocals-synthetic-packs` artifact for manual testing. The local job is
+  deliberately duplicate coverage: the shared workflow is pinned to a mutable
+  `@main` ref, so this repo's own gate is what protects the plugin.
+
+The manual matrix — two host versions, microphone states, transport,
+splitscreen layouts, display scales and rollback — lives in
+[docs/release-manual-matrix.md](../release-manual-matrix.md) and in #17's
+Definition of Done; this document does not duplicate that checklist.
 
 ## Related issues
 

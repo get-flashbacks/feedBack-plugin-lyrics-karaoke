@@ -36,6 +36,19 @@ re-homes the renderer behind the Karaoke button. The two rows below are the
 only routes left into the renderer, and they both go through splitscreen's
 `feedBackViz_` / `slopsmithViz_` prefix probe rather than discovery.
 
+Two clarifications before you start:
+
+- The **Karaoke** button's ribbon is reachable today and, since
+  [#45](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/45),
+  draws duet guide bars, the get-ready cue and the accuracy tint itself. The
+  observation half of `Duet` and `Single panel` can therefore be recorded
+  against the ribbon now; only the rows that need the stage renderer stay
+  Blocked.
+- The ribbon and the renderer both have **no sung-part control** as of
+  1.13.0 (the manifest declares no settings, so nothing renders or calls
+  them). The scored voice is always the primary one — record `Duet` on that
+  basis rather than trying to switch parts.
+
 | Area | Action and expected result | Minimum | Latest | Evidence / issue |
 | --- | --- | --- | --- | --- |
 | Preparation | Align/save, generate pitch, export LRC, reopen pack; data persists. | | | |
@@ -49,7 +62,7 @@ only routes left into the renderer, and they both go through splitscreen's
 | Interface | Select multichannel device and Mix / Ch 1 / Ch 2; input follows selection. | | | |
 | Disconnect | Unplug active device; capture stops, error appears, and reconnect requires a click. | | | |
 | Transport | Play, pause, seek forward/back, restart, switch songs, and reach end; no stale score or timer remains. | | | |
-| Duet | Switch sung parts; scored slabs and other-part guides use one pitch axis. | | | |
+| Duet | Confirm the other parts draw as guide bars on the scored voice's pitch axis. Part switching has no control in 1.13.0, so record the primary voice only (see the note above). | | | |
 | Single panel | Solo, incomplete-pitch, and lyrics-only packs draw appropriately. | | | |
 | Mixed split | Vocals plus instrument panel; one vocals renderer, correct song data, no mic conflict. | | | |
 | Two vocals panels | Select each panel as scoring target; only one stream owns the mic, panel state stays separate. | | | |

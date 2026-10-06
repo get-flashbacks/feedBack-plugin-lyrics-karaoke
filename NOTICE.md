@@ -19,7 +19,13 @@ this plugin on these dates:
   `screen.js` to this plugin's playback and microphone interfaces.
 - 2026-09-25: corrected the integrated renderer's host song lookup so the
   adapted stage receives playback data for each panel.
+- 2026-10-05: absorbed Karaoke Highway's duet guide-bar treatment and its
+  get-ready cue and countdown into this plugin's default pitch ribbon in
+  `screen.js`, so the ribbon and the stage present the same features.
 
 The corresponding source files retain comments identifying the adapted
-sections and their origin. The complete source for this version is available
+sections and their origin, with one known exception: the ribbon's duet
+guides block in `screen.js` (`// ── Duet guides (#45)`) does not yet name
+Karaoke Highway. That origin comment is deferred to the release PR that
+performs the version bump. The complete source for this version is available
 in the [get-flashbacks repository](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke).
