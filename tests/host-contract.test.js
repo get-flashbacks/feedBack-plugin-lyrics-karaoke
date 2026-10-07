@@ -180,6 +180,7 @@ function makeHighway(canvas, bundle) {
             bus.emit('viz:renderer:ready', {});
             return true;
         },
+        getRenderer() { return this.current; },
         /** One host frame. A throw is recorded and counted against the revert
          *  rule rather than propagated, so a panel that throws looks like what
          *  the host would do about it. */
@@ -807,4 +808,51 @@ test('a pending transfer retry cannot take the device after its target dies', as
     }
     assert.strictEqual(screen._lkMic.getState().ownerId, null);
     assert.strictEqual(media.tracks.filter((t) => !t.stopped).length, 0);
+});
+// ── Fullscreen renderer restore (#47) ────────────────────────────────────
+
+
+// ── Fullscreen renderer restore (#47) ────────────────────────────────────
+
+test('fullscreen enter saves the previous renderer and exit restores it', () => {
+    const previousRenderer = { draw() {}, destroy() {} };
+    pageHighway.setRenderer(previousRenderer);
+    assert.strictEqual(pageHighway.current, previousRenderer);
+
+    screen.setKaraokeMode(true);
+    window.feedBackViz_lyrics_karaoke = () => ({ draw() {}, destroy() {} });
+
+    const enter = screen._fullscreenEnterForTest();
+    assert.strictEqual(typeof enter, 'function');
+    enter();
+    assert.notStrictEqual(pageHighway.current, previousRenderer,
+        'fullscreen swapped in a different renderer');
+    assert.ok(pageHighway.current, 'fullscreen renderer is set');
+
+    const exit = screen._fullscreenExitForTest();
+    assert.strictEqual(typeof exit, 'function');
+    exit();
+    assert.strictEqual(pageHighway.current, previousRenderer,
+        'exiting fullscreen restores the renderer that was active before entering');
+
+    screen.setKaraokeMode(false);
+});
+
+test('fullscreen exit with no previous renderer sets null', () => {
+    pageHighway.setRenderer(null);
+    assert.strictEqual(pageHighway.current, null);
+
+    screen.setKaraokeMode(true);
+    window.feedBackViz_lyrics_karaoke = () => ({ draw() {}, destroy() {} });
+
+    const enter = screen._fullscreenEnterForTest();
+    enter();
+    assert.ok(pageHighway.current, 'fullscreen renderer is set');
+
+    const exit = screen._fullscreenExitForTest();
+    exit();
+    assert.strictEqual(pageHighway.current, null,
+        'no previous renderer means exit sets null, same as before');
+
+    screen.setKaraokeMode(false);
 });

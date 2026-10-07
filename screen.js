@@ -37,6 +37,8 @@
     let tokenIndexMap = new Map();   // tok → index into pitchData.tokens; rebuilt on each load
     let songPitchRange = null;       // {lo, hi} fixed across the song so bars don't shift vertically as the window scrolls
     let karaokeMode = false;         // user toggle
+    let _fullscreenEnterRef = null;  // test hook: current _fullscreenEnter
+    let _fullscreenExitRef = null;   // test hook: current _fullscreenExit
     // Tracks whether the player screen is the currently-active screen.
     // onToggleClick() awaits network calls before flipping karaokeMode on;
     // if the user navigates away during one of those awaits, the showScreen
@@ -279,6 +281,7 @@
 
     let fullscreenBtn = null;
     let _fullscreenActive = false;
+    let _previousRenderer = null;
 
     function ensureFullscreenButton() {
         if (fullscreenBtn) return;
@@ -374,6 +377,7 @@
         if (!renderer) return;
         if (renderer.pluginId === undefined) renderer.pluginId = 'lyrics_karaoke';
         if (renderer.source === undefined) renderer.source = 'lyrics_karaoke';
+        _previousRenderer = (window.highway.getRenderer ? window.highway.getRenderer() : (window.highway.renderer || null));
         try {
             window.highway.setRenderer(renderer);
         } catch (e) { /* ignore */ }
@@ -386,12 +390,16 @@
         if (!_fullscreenActive) return;
         const hasSetRenderer = (typeof window !== 'undefined' && window.highway && typeof window.highway.setRenderer === 'function');
         try {
-            if (hasSetRenderer) window.highway.setRenderer(null);
+            if (hasSetRenderer) window.highway.setRenderer(_previousRenderer);
         } catch (e) { /* ignore */ }
+        _previousRenderer = null;
         _fullscreenActive = false;
         refreshFullscreenButton();
         refreshButtonState();
     }
+
+    _fullscreenEnterRef = _fullscreenEnter;
+    _fullscreenExitRef = _fullscreenExit;
 
 
     function ensureToggleButton() {
@@ -5061,6 +5069,8 @@
             _vizDrawFrame,
             setKaraokeMode,
             _karaokeModeForTest: () => karaokeMode,
+            _fullscreenEnterForTest: () => _fullscreenEnterRef,
+            _fullscreenExitForTest: () => _fullscreenExitRef,
             // #11 vocal pitch engine
             yinDetect,
             freqToMidi,
