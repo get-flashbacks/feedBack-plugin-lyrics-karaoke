@@ -318,10 +318,15 @@ def test_rollback_hashes_survive_plugin_swap(tmp_path, monkeypatch):
     assert after_legacy_forward == after_legacy_rollback, "legacy dir sidecar hash changed on roll forward"
 
     # ── Step 5: plugin directory was never a write target ────────────────────
-    plugin_dir = work / "plugin-dir"
-    plugin_dir.mkdir()
-    stray = [p for p in work.rglob("*") if p.is_file() and plugin_dir in p.parents]
-    assert not stray, f"stray write landed in plugin dir: {stray}"
+    # Every file written under work must live inside the library (the pack
+    # directories). Anything outside the library is a stray write — the
+    # unpack cache is under tmp_path/sloppak_cache, outside work, so it is
+    # not a false positive.
+    stray = [
+        p for p in work.rglob("*")
+        if p.is_file() and library not in p.parents
+    ]
+    assert not stray, f"stray write landed outside the pack directory: {stray}"
 
     # ── Record hashes for the release PR (printed to stdout) ─────────────────
     print("\n=== ROLLBACK HASHES ===")
