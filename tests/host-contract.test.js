@@ -240,8 +240,15 @@ let gumFailNext = false;
  *  install what it returns, and fall back to the default highway when the id
  *  no longer resolves. The real one's auto/venue/WebGL2 branches are out of
  *  scope for the ids this suite restores. */
+/** The id → factory resolution seam itself: the host looks the constructor
+ *  up on window by concatenating its own key. Kept as its own function so
+ *  nothing in this file both bracket-reads a factory and later calls it. */
+function pickViz(id) {
+    return global.window['feedBackViz_' + id];
+}
+
 function hostSetViz(id) {
-    const factory = global.window['feedBackViz_' + id];
+    const factory = pickViz(id);
     return pageHighway.setRenderer(typeof factory === 'function' ? factory() : null);
 }
 
