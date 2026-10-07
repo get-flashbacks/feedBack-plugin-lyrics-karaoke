@@ -44,8 +44,8 @@ Install the release candidate into two FeedBack instances:
 
 - **Minimum host.** `0.3.0-alpha.1` (the `minHost` declared in
   `plugin.json`). Install the candidate plugin by copying `screen.js`,
-  `routes.py`, and `screen.html` into the host's plugin directory and
-  reloading.
+  `routes.py`, `screen.html`, and `plugin.json` into the host's plugin
+  directory and reloading.
 - **Latest host.** The most recent stable FeedBack release the plugin
   supports. Install the same candidate files.
 
@@ -74,7 +74,7 @@ it in steps 4 and 5.
 Locate a pack that was prepared by the previously released version
 (`v1.12.0`, plugin version `1.12.0`) and has not been regenerated. If you
 do not have one, prepare a pack now using the v1.12.0 plugin files (see
-Rollback step 1 below for how to obtain them), then uninstall v1.12.0 and
+Rollback step 2 for how to obtain them), then uninstall v1.12.0 and
 reinstall the candidate before continuing. Do not regenerate this pack under
 the candidate.
 
@@ -150,8 +150,10 @@ feedBack `0dcc913`. Note the host commit beside the hashes.
    ```
 
 2. Replace the candidate plugin files with the `v1.12.0` release files.
-   Download the release from GitHub (it is flagged as a pre-release, so
-   uncheck "Hide pre-release" in the releases filter). Reload the host.
+   The `v1.12.0` release has no downloadable assets, so copy `screen.js`,
+   `routes.py`, `screen.html`, and `plugin.json` from the `v1.12.0` tag in
+   the git tree (or check out that tag and copy the four files). Reload the
+   host.
 
 3. Open both packs in the preparation screen with **no regeneration** —
    just load them. Verify that lyrics, any pitch, and playback all work.
