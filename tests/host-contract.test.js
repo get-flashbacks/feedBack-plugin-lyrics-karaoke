@@ -233,13 +233,6 @@ const fetches = [];            // every URL the plugin asked for, in order
 let fetchImpl = null;          // set per test
 let gumFailNext = false;
 
-/** `window.setViz(id)` — the picker's install path, which core exposes on
- *  window (a classic-script top-level `setViz` at `minHost`, an explicit
- *  `Object.assign(window, …)` on current `main`). Fullscreen exit only leans
- *  on the part every id goes through: resolve `window['feedBackViz_' + id]`,
- *  install what it returns, and fall back to the default highway when the id
- *  no longer resolves. The real one's auto/venue/WebGL2 branches are out of
- *  scope for the ids this suite restores. */
 /** The id → factory resolution seam itself: the host looks the constructor
  *  up on window by concatenating its own key. Kept as its own function so
  *  nothing in this file both bracket-reads a factory and later calls it. */
@@ -247,6 +240,13 @@ function pickViz(id) {
     return global.window['feedBackViz_' + id];
 }
 
+/** `window.setViz(id)` — the picker's install path, which core exposes on
+ *  window (a classic-script top-level `setViz` at `minHost`, an explicit
+ *  `Object.assign(window, …)` on current `main`). Fullscreen exit only leans
+ *  on the part every id goes through: resolve `window['feedBackViz_' + id]`,
+ *  install what it returns, and fall back to the default highway when the id
+ *  no longer resolves. The real one's auto/venue/WebGL2 branches are out of
+ *  scope for the ids this suite restores. */
 function hostSetViz(id) {
     const factory = pickViz(id);
     return pageHighway.setRenderer(typeof factory === 'function' ? factory() : null);
