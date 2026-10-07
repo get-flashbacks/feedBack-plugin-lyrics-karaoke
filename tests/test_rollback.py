@@ -41,6 +41,12 @@ import routes as head_routes  # noqa: E402
 
 def _load_routes_from_rev(rev: str):
     """Import routes.py from a specific git revision under a fresh module name."""
+    # CI checkouts use actions/checkout with default fetch-depth and no tags,
+    # so fetch the tag ourselves before reading it.
+    subprocess.run(
+        ["git", "fetch", "--depth=1", "origin", f"+refs/tags/{rev}:refs/tags/{rev}"],
+        cwd=str(ROOT), check=True,
+    )
     blob = subprocess.check_output(
         ["git", "show", f"{rev}:routes.py"], cwd=str(ROOT),
     )
