@@ -167,19 +167,20 @@ def _dlc_paths_mock(library_dir: Path):
 
 def _wire_host(module, tmp_path, library_dir, log_name):
     """Wire module routes into a FastAPI TestClient pointed at library_dir."""
-    for name in ("_config_dir", "_get_dlc_dir", "SLOPPAK_CACHE_DIR", "_log"):
-        if hasattr(module, name):
-            setattr(module, name, getattr(module, name))
     sloppak = _sloppak_mock(library_dir)
     dlc_paths = _dlc_paths_mock(library_dir)
     sys.modules["sloppak"] = sloppak
     sys.modules["dlc_paths"] = dlc_paths
     sys.modules.pop("safepath", None)
 
+    cache_dir = tmp_path / "sloppak_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     app = FastAPI()
     module.setup(app, {
         "config_dir": str(tmp_path),
         "get_dlc_dir": lambda: library_dir,
+        "get_sloppak_cache_dir": lambda: cache_dir,
         "log": logging.getLogger(log_name),
     })
     return TestClient(app)
