@@ -123,8 +123,9 @@ Recorded 2026-10-06 on `main` at commit `0eaebf6`: **130 pytest cases and
 `npm test`). These pin the four "no known bug" criteria against the stub
 host, so the rows above only re-confirm them on a real one.
 
-Recorded 2026-10-07 on `main` at commit `58e950a`: **131 pytest cases
-(including `test_rollback.py`) and 215 `node --test` cases, all green**.
+Recorded 2026-10-07 on `main` at commit `58e950a` in release PR
+[#55](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/pull/55):
+**131 pytest cases (including `test_rollback.py`) and 215 `node --test`
 `test_rollback_hashes_survive_plugin_swap` loads `v1.12.0`'s `routes.py`
 from the git tree as a separate module, prepares directory-form and
 zip-form packs under the release candidate, hashes the sidecars, swaps
