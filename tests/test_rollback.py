@@ -17,6 +17,7 @@ and zip-form packs and records the before/after hashes so they can be attached
 to the release PR.
 """
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -37,27 +38,35 @@ sys.path.insert(0, str(ROOT))
 import routes as head_routes  # noqa: E402
 
 
-def _load_routes_from_rev(rev: str):
-    """Import routes.py from a specific git revision under a fresh module name."""
+def _load_routes_v1120(tmp_dir: Path):
+    """Import v1.12.0's routes.py from the git tree under a fresh module name.
+
+    The blob is written to a real file and imported through importlib, so the
+    module behaves exactly like a normally imported routes.py. No git command
+    accepts a dynamic argument: every ref the suite reads is the pinned
+    literal ``v1.12.0`` below.
+    """
+    name = "routes_v1.12.0"
     # CI checkouts use actions/checkout with default fetch-depth and no tags,
     # so fetch the tag ourselves before reading it — but only when it is
     # actually missing, so an offline or read-only clone does not fail.
     if subprocess.run(
-        ["git", "rev-parse", "-q", "--verify", f"refs/tags/{rev}"],
+        ["git", "rev-parse", "-q", "--verify", "refs/tags/v1.12.0"],
         cwd=str(ROOT), check=False,
     ).returncode != 0:
         subprocess.run(
-            ["git", "fetch", "--depth=1", "origin", f"+refs/tags/{rev}:refs/tags/{rev}"],
+            ["git", "fetch", "--depth=1", "origin", "+refs/tags/v1.12.0:refs/tags/v1.12.0"],
             cwd=str(ROOT), check=False,
         )
     blob = subprocess.check_output(
-        ["git", "show", f"{rev}:routes.py"], cwd=str(ROOT),
+        ["git", "show", "v1.12.0:routes.py"], cwd=str(ROOT),
     )
-    name = f"routes_{rev}"
-    spec = importlib.util.spec_from_loader(name, loader=None, origin=f"<{rev}>")
+    routes_path = tmp_dir / "routes_v1.12.0.py"
+    routes_path.write_bytes(blob)
+    spec = importlib.util.spec_from_file_location(name, routes_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
-    exec(compile(blob, f"routes_{rev}.py", "exec"), mod.__dict__)
+    spec.loader.exec_module(mod)
     return mod
 
 
@@ -161,13 +170,11 @@ def _dlc_paths_mock(library_dir: Path):
         if not filename:
             return None
         safe = str(filename).replace("\\", "/")
-        try:
-            root = Path(candidate_dlc).resolve()
+        root = Path(candidate_dlc).resolve()
+        with contextlib.suppress(OSError, ValueError):
             target = (root / safe).resolve()
             if target.is_relative_to(root):
                 return target
-        except (OSError, ValueError):
-            pass
         return None
 
     mod._resolve_dlc_path = _resolve
@@ -289,7 +296,7 @@ def test_rollback_hashes_survive_plugin_swap(tmp_path, monkeypatch):
     assert after_legacy_head == before_legacy, "legacy dir sidecar hash changed under HEAD"
 
     # ── Step 3: swap to v1.12.0 routes and reopen ────────────────────────────
-    v1120 = _load_routes_from_rev("v1.12.0")
+    v1120 = _load_routes_v1120(tmp_path)
     # Need a fresh TestClient because setup() registers routes on a new app.
     client_v1120 = _wire_host(v1120, tmp_path, library, "test.rollback.v1120")
     # v1.12.0 does `from dlc_paths import _resolve_dlc_path` inside
