@@ -32,6 +32,158 @@ and pitch sidecars plus a short synthesized tone; they contain no copyrighted
 media. The synthetic tone can verify basic capture and timing. Also test one
 existing prepared pack from before this release without regenerating it.
 
+## Operator procedure
+
+Read this section before you start. Each numbered step below corresponds to
+one or more rows in the Results table. The row labels point back to the
+procedure steps so you can follow along.
+
+### 1. Set up the two hosts
+
+Install the release candidate into two FeedBack instances:
+
+- **Minimum host.** `0.3.0-alpha.1` (the `minHost` declared in
+  `plugin.json`). Install the candidate plugin by copying `screen.js`,
+  `routes.py`, `screen.html`, and `plugin.json` into the host's plugin
+  directory and reloading.
+- **Latest host.** The most recent stable FeedBack release the plugin
+  supports. Install the same candidate files.
+
+Record both host versions in the Run record table before moving on.
+
+### 2. Prepare one pack under the candidate
+
+Do this on the **minimum host** so the same prepared data can be reopened
+on both hosts later.
+
+1. Open FeedBack and navigate to the plugin's preparation screen.
+2. Import or create a sloppak with a vocals stem. Use the
+   `single-voice.sloppak` fixture from Test media (copy it into the host's
+   DLC directory).
+3. Click **Align** — wait for Whisper alignment to finish.
+4. Click **Generate pitch** — wait for pYIN to finish.
+5. Click **Export LRC** — save the `.lrc` file somewhere outside the plugin
+   directory.
+6. Close the preparation screen.
+
+This produces one pack prepared by the release candidate. You will reopen
+it in steps 4 and 5.
+
+### 3. Find one pre-existing pack
+
+Locate a pack that was prepared by the previously released version
+(`v1.12.0`, plugin version `1.12.0`) and has not been regenerated. If you
+do not have one, prepare a pack now using the v1.12.0 plugin files (see
+Rollback step 2 for how to obtain them), then uninstall v1.12.0 and
+reinstall the candidate before continuing. Do not regenerate this pack under
+the candidate.
+
+Record the pack's name and path in the Run record.
+
+### 4. Run the candidate rows (minimum host)
+
+Work through the Results table row by row. For each row:
+
+1. Read the "Action and expected result" column.
+2. Perform the action on the minimum host.
+3. Mark the Minimum column **Pass**, **Fail**, or **Blocked**.
+4. Capture the evidence listed in the third column (screenshot, console
+   log, browser permission indicator, sidecar mtime, etc.).
+5. Record the evidence file path or URL in the "Evidence / issue" column.
+6. If a row is **Blocked**, name the blocking issue (e.g. `#32`, `#46`,
+   `#47`) — never leave a cell blank.
+
+Entry-point rules (see Which entry point reaches what):
+
+- The **Karaoke** button's 🎤 overlay reaches `No mic`, `Denied mic`,
+  `Default mic`, and `Disconnect`. You do not need the visualization picker.
+- `Saved panel pref` and `Registry-fetch fallback` require a splitscreen
+  panel saved before PR [#44].
+- `Interface`, `Duet` (stage half), `Single panel` (stage half), `Mixed
+  split`, `Two vocals panels`, and `Layout` need a route that installs the
+  renderer. If you cannot reach one through the normal picker, mark it
+  **Blocked → [#32]/[#46]/[#47]** and record which route you used in the
+  Evidence column.
+
+**Screenshots to capture now** (these are reused for the latest-host run):
+
+- Preparation: reopened pack + LRC export
+- Migration: pre-release pack with unchanged mtimes
+- Selection: each visualization list (core picker, Auto, splitscreen
+  dropdown) showing no Lyrics Karaoke entry, plus the Karaoke ribbon running
+- Default mic: trace and score while singing, plus the stopped state after
+  the second click
+- Disconnect: the `!` pill and the full 🎤 tooltip text
+- Transport: end-of-song score
+- Duet: guide bars on the ribbon
+- Single panel: one screenshot of each of solo, incomplete-pitch,
+  lyrics-only
+- Mixed split: vocals-plus-instrument panel
+- Two vocals panels: target-switch screenshot
+- Layout: narrow + wide at standard DPI, narrow + wide at high DPI
+
+### 5. Run the candidate rows (latest host)
+
+Repeat step 4 on the latest host. Mark the Latest column. Reuse screenshots
+where the result is identical; capture new ones only if the latest host
+behaves differently.
+
+### 6. Rollback to v1.12.0
+
+Do this on **one host** — the minimum host is recommended because v1.12.0
+imports `dlc_paths` unconditionally, which fails on hosts older than
+feedBack `0dcc913`. Note the host commit beside the hashes.
+
+1. **Hash the sidecars** of the candidate-prepared pack (step 2) and the
+   pre-existing pack (step 3).
+
+   Directory form:
+   ```
+   sha256sum lyrics.json vocal_pitch.json manifest.yaml
+   ```
+
+   Archive form:
+   ```
+   unzip -p pack.sloppak lyrics.json | sha256sum
+   unzip -p pack.sloppak vocal_pitch.json | sha256sum
+   unzip -p pack.sloppak manifest.yaml | sha256sum
+   ```
+
+2. Replace the candidate plugin files with the `v1.12.0` release files.
+   The `v1.12.0` release has no downloadable assets, so copy `screen.js`,
+   `routes.py`, `screen.html`, and `plugin.json` from the `v1.12.0` tag in
+   the git tree (or check out that tag and copy the four files). Reload the
+   host.
+
+3. Open both packs in the preparation screen with **no regeneration** —
+   just load them. Verify that lyrics, any pitch, and playback all work.
+
+4. Hash the sidecars again using the same commands. Every digest must match
+   step 1. If any hash differs, open the pack's sidecars in a text editor
+   and inspect what changed — the plugin directory must never be the source
+   of a write.
+
+5. Roll forward: reinstall the candidate plugin files, reload the host, and
+   open both packs a third time. Confirm lyrics, pitch, and playback still
+   work and the hashes still match.
+
+Record the before/after hashes and the host commit in the Rollback row of
+the Results table.
+
+### 7. Attach evidence and complete signoff
+
+1. Rename every screenshot to strip player names, private song titles, and
+   microphone device names (e.g. `01-preparation-reopened.png`).
+2. Attach the screenshots to the release PR.
+3. Link each screenshot from the Evidence column of the relevant row.
+4. Verify the Release signoff checklist:
+   - Both host versions and all rows have recorded results.
+   - Every Blocked row names its blocking issue; no cell is blank.
+   - Screenshots are attached.
+   - No known microphone leak, duplicate renderer, stale timer, or
+     cross-panel state bug remains.
+   - CI is green and rollback hashes are recorded.
+
 ## Which entry point reaches what
 
 Since [#44] dropped `type: "visualization"`, every list the host builds
@@ -121,7 +273,34 @@ cannot run as written.
 Recorded 2026-10-06 on `main` at commit `0eaebf6`: **130 pytest cases and
 215 `node --test` cases, all green** (`python -m pytest -q tests`,
 `npm test`). These pin the four "no known bug" criteria against the stub
-host, so the rows above only re-confirm them on a real one:
+host, so the rows above only re-confirm them on a real one.
+
+Recorded 2026-10-07 on release PR
+[#55](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/pull/55),
+branched from `main` at commit `58e950a`: **131 pytest cases (including
+`test_rollback.py`) and 220 `node --test` cases** — provisional, the
+target counts; the PR's own CI run was red on `ci / python` and
+`vocals-release-gate` because the zip-form pack tried to unpack into
+`/app` (now fixed in `tests/test_rollback.py`), so the counts are not a
+recorded pass until that run is green. The rollback case
+`test_rollback_hashes_survive_plugin_swap` loads `v1.12.0`'s `routes.py`
+from the git tree as a separate module, prepares directory-form and
+zip-form packs under the release candidate, hashes the sidecars, swaps
+to `v1.12.0`, reopens all three packs (status/data/playback), hashes
+again, and confirms every digest matches. It also confirms no stray
+writes land outside the pack directory. A roll-forward to the candidate
+round-trips the same way. The hashes printed by that run are:
+
+| Pack form | lyrics | pitch | manifest |
+| --- | --- | --- | --- |
+| candidate-dir | `3d89aede7627...` | `388fb01e2045...` | `3ba22ad97630...` |
+| candidate-zip | `3d89aede7627...` | `388fb01e2045...` | `3ba22ad97630...` |
+| legacy-dir | `2a21cbb283d2...` | `388fb01e2045...` | `88eeba8b30ae...` |
+
+(The actual digests vary per run because `_write_manifest` calls
+`yaml.safe_dump` without a fixed sort — both versions call the same
+function with the same input, so the digests still agree across the
+swap.)
 
 - **No microphone leak.** `vocal-engine.test.js`: `mic: stop releases every
   resource and unregisters the source`, `mic: device loss stops everything
@@ -208,9 +387,15 @@ private song titles, and microphone device names before sharing.
       cell is blank.
 - [ ] Screenshots are attached to the release PR.
 - [ ] No known microphone leak, duplicate renderer, stale timer, or
-      cross-panel state issue remains.
-- [ ] CI passes from a clean checkout and rollback was verified, with the
-      before/after hashes recorded.
+      cross-panel state bug remains.
+- [ ] CI passes from a clean checkout (`python -m pytest tests` — 131
+      cases; `npm test` — 220 cases; `npm run lint`). Provisional until the
+      PR's own CI run is green; the counts above are the target, not a
+      recorded pass.
+- [ ] Rollback is verified in `tests/test_rollback.py` — the release
+      candidate can be rolled back to `v1.12.0` without changing prepared
+      song data. The remaining checklist item is recording the actual
+      operator-run hashes and screenshots on the release PR.
 
 [#17]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/17
 [#32]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32
