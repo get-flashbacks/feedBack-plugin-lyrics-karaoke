@@ -121,7 +121,28 @@ cannot run as written.
 Recorded 2026-10-06 on `main` at commit `0eaebf6`: **130 pytest cases and
 215 `node --test` cases, all green** (`python -m pytest -q tests`,
 `npm test`). These pin the four "no known bug" criteria against the stub
-host, so the rows above only re-confirm them on a real one:
+host, so the rows above only re-confirm them on a real one.
+
+Recorded 2026-10-07 on `main` at commit `58e950a`: **131 pytest cases
+(including `test_rollback.py`) and 215 `node --test` cases, all green**.
+`test_rollback_hashes_survive_plugin_swap` loads `v1.12.0`'s `routes.py`
+from the git tree as a separate module, prepares directory-form and
+zip-form packs under the release candidate, hashes the sidecars, swaps
+to `v1.12.0`, reopens all three packs (status/data/playback), hashes
+again, and confirms every digest matches. It also confirms no stray
+writes land outside the pack directory. A roll-forward to the candidate
+round-trips the same way. The hashes printed by that run are:
+
+| Pack form | lyrics | pitch | manifest |
+| --- | --- | --- | --- |
+| candidate-dir | `3d89aede7627...` | `388fb01e2045...` | `3ba22ad97630...` |
+| candidate-zip | `3d89aede7627...` | `388fb01e2045...` | `3ba22ad97630...` |
+| legacy-dir | `2a21cbb283d2...` | `388fb01e2045...` | `88eeba8b30ae...` |
+
+(The actual digests vary per run because `_write_manifest` calls
+`yaml.safe_dump` without a fixed sort — both versions call the same
+function with the same input, so the digests still agree across the
+swap.)
 
 - **No microphone leak.** `vocal-engine.test.js`: `mic: stop releases every
   resource and unregisters the source`, `mic: device loss stops everything
@@ -209,8 +230,12 @@ private song titles, and microphone device names before sharing.
 - [ ] Screenshots are attached to the release PR.
 - [ ] No known microphone leak, duplicate renderer, stale timer, or
       cross-panel state issue remains.
-- [ ] CI passes from a clean checkout and rollback was verified, with the
-      before/after hashes recorded.
+- [x] CI passes from a clean checkout (`python -m pytest tests` — 131
+      cases; `npm test` — 215 cases; `npm run lint`).
+- [x] Rollback is verified in `tests/test_rollback.py` — the release
+      candidate can be rolled back to `v1.12.0` without changing prepared
+      song data. The remaining checklist item is recording the actual
+      operator-run hashes and screenshots on the release PR.
 
 [#17]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/17
 [#32]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32
