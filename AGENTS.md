@@ -14,13 +14,13 @@ python3 tests/fixtures/generate_feedpaks.py /tmp/vocals-fixtures
 ```
 
 - Node: use `node` / `npm`, not `python`. ESLint 10 requires Node 20.19+, 22.13+, or 24+. CI uses Node 22.
-- Python: this environment uses `python3`; README's `python -m pip` won't run.
+- Python: this environment uses `python3`; README's `python -m pip` was missing locally but works in CI.
 
 ## CI gates (pull_request / push to main)
 
 1. `version-bumped-on-change` — any functional source change (`.py|js|html|css` outside `tests?/`) MUST be accompanied by a `plugin.json` version bump and a `CHANGELOG.md` `[Unreleased]` update. The diff is against the merge base.
 2. `idempotent-top-level-guard` — `screen.js` must have a `window.__*` reload guard because it re-executes on plugin reload.
-3. Shared reusable CI runs `tests/*.test.js`.
+3. Shared reusable CI runs `tests/*.test.js`; the same workflow also runs a `python` job that installs pytest and runs `tests/test_*.py`. This repo's `ci.yml` adds `vocals-release-gate` (lint, syntax, test, synthetic-pack generation). `compliance.yml` adds `version-bumped-on-change`, `idempotent-top-level-guard`, and `changelog-updated`.
 
 ## Repo shape
 
@@ -31,7 +31,7 @@ python3 tests/fixtures/generate_feedpaks.py /tmp/vocals-fixtures
 
 ## ESLint quirk
 
-`eslint.config.mjs` is named `.mjs` deliberately. A `eslint.config.js` at repo root would be caught by the compliance workflow's functional-source glob, tying it to the plugin-version gate.
+`eslint.config.mjs` is named `.mjs` deliberately. An `eslint.config.js` at repo root would be caught by the compliance workflow's functional-source glob, tying it to the plugin-version gate.
 
 ## ESLint exemptions on `screen.js`
 
@@ -44,6 +44,8 @@ Known dead-code sites exist (`let body = null`, `let devices = []`, one dropped 
 ## Screen.js reload/idempotency
 
 Top-level `addEventListener` / `setInterval` calls must be guarded by a `window.__*` flag. Existing guards:
+- `window.__feedBackLyricsKaraokeHooksInstalled`
+- `window.__feedBackLyricsKaraokeVizRegistered`
 - `window.__feedBackLyricsKaraokeMic`
 - `window.__feedBackLyricsKaraokeDeviceWatch`
 
