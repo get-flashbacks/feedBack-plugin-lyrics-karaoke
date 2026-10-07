@@ -38,8 +38,10 @@ and the repository's tagged history.
   `plugin.json`. That check is intentionally allowed to remain red for this
   PR because the combined release of #44 and #45 has not shipped yet — the
   version bump belongs with the release, not with each intermediate
-  sub-issue. (`plugin.json` was also left at 1.13.0 in commit `41163a3` for
-  #44.)
+  sub-issue. The fullscreen fix ([#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47))
+  is another step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
+  and rides that same deferral. (`plugin.json` was also left at 1.13.0 in
+  commit `41163a3` for #44.)
 
 ### Changed
 
@@ -113,6 +115,18 @@ and the repository's tagged history.
   declared `minHost` (`0.3.0-alpha.1`) upward, and a host shipping neither
   helper refuses the filename instead of joining it onto the library directory
   unchecked.
+- Leaving fullscreen karaoke restores the visualization that was active when
+  it started ([#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47),
+  fourth step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)),
+  instead of dropping back to the default 2D highway. The host's highway api
+  exposes no renderer getter, so fullscreen enter records the picker's
+  persisted selection (`localStorage.vizSelection`, falling back to the
+  picker's own value when storage is blocked) and exit re-installs it through
+  `window.setViz`, which rebuilds from `window['feedBackViz_' + id]` and
+  falls back to the default highway when that id no longer resolves. Five
+  `tests/host-contract.test.js` cases cover it: two named renderers (3D
+  Highway, Keys Highway), an unresolvable id, nothing persisted, and blocked
+  storage.
 
 ### Added
 

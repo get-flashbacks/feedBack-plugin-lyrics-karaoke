@@ -281,7 +281,7 @@
 
     let fullscreenBtn = null;
     let _fullscreenActive = false;
-    let _previousRenderer = null;
+    let _previousViz = null;         // persisted viz id to restore on exit
 
     function ensureFullscreenButton() {
         if (fullscreenBtn) return;
@@ -377,7 +377,11 @@
         if (!renderer) return;
         if (renderer.pluginId === undefined) renderer.pluginId = 'lyrics_karaoke';
         if (renderer.source === undefined) renderer.source = 'lyrics_karaoke';
-        _previousRenderer = (window.highway.getRenderer ? window.highway.getRenderer() : (window.highway.renderer || null));
+        // The host exposes no renderer getter (its api object ends at
+        // isDefaultRenderer() and the slot is closure-private), so what we are
+        // replacing can only be remembered as the id the picker persisted, to
+        // be re-installed by id on exit.
+        _previousViz = _persistedVizSelection();
         try {
             window.highway.setRenderer(renderer);
         } catch (e) { /* ignore */ }
@@ -386,13 +390,41 @@
         refreshButtonState();
     }
 
+    /** The id the host would rebuild the active renderer from: the picker's
+     *  persisted selection, read the way core's own restore pass reads it.
+     *  Storage first because it survives the picker being absent; the picker
+     *  itself is the fallback for hosts where storage is blocked (private
+     *  mode, sandboxed iframes) and the selection only lives in the DOM. */
+    function _persistedVizSelection() {
+        try {
+            const saved = window.localStorage && window.localStorage.getItem('vizSelection');
+            if (saved) return saved;
+        } catch (e) { /* storage blocked; fall through to the picker */ }
+        try {
+            const sel = document.getElementById('viz-picker');
+            if (sel && sel.value) return sel.value;
+        } catch (e) { /* no picker on this screen */ }
+        return null;
+    }
+
     function _fullscreenExit() {
         if (!_fullscreenActive) return;
         const hasSetRenderer = (typeof window !== 'undefined' && window.highway && typeof window.highway.setRenderer === 'function');
+        const previousViz = _previousViz;
+        _previousViz = null;
         try {
-            if (hasSetRenderer) window.highway.setRenderer(_previousRenderer);
+            if (hasSetRenderer) {
+                if (previousViz && typeof window.setViz === 'function') {
+                    // Re-install by id through the host's own picker path: it
+                    // builds a fresh renderer from window['feedBackViz_' + id]
+                    // (the outgoing one is destroyed either way) and degrades
+                    // to the default highway when the id no longer resolves.
+                    window.setViz(previousViz);
+                } else {
+                    window.highway.setRenderer(null);
+                }
+            }
         } catch (e) { /* ignore */ }
-        _previousRenderer = null;
         _fullscreenActive = false;
         refreshFullscreenButton();
         refreshButtonState();

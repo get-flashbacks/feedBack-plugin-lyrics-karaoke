@@ -151,6 +151,11 @@ function fakeEl(tag) {
  *  for the whole run rather than counting consecutive ones, so a single bad
  *  frame cannot be hidden by the seven good frames after it.
  *
+ *  There is no `getRenderer()`: core's `createHighway()` api object ends at
+ *  `isDefaultRenderer()` and the slot is closure-private, so a plugin cannot
+ *  read the active renderer back — which is why fullscreen exit re-installs
+ *  by persisted id through `window.setViz` instead of restoring an object.
+ *
  *  Each splitscreen panel has its own `hw`, so this is built per panel. */
 function makeHighway(canvas, bundle) {
     return {
@@ -180,7 +185,6 @@ function makeHighway(canvas, bundle) {
             bus.emit('viz:renderer:ready', {});
             return true;
         },
-        getRenderer() { return this.current; },
         /** One host frame. A throw is recorded and counted against the revert
          *  rule rather than propagated, so a panel that throws looks like what
          *  the host would do about it. */
@@ -229,12 +233,25 @@ const fetches = [];            // every URL the plugin asked for, in order
 let fetchImpl = null;          // set per test
 let gumFailNext = false;
 
+/** `window.setViz(id)` — the picker's install path, which core exposes on
+ *  window (a classic-script top-level `setViz` at `minHost`, an explicit
+ *  `Object.assign(window, …)` on current `main`). Fullscreen exit only leans
+ *  on the part every id goes through: resolve `window['feedBackViz_' + id]`,
+ *  install what it returns, and fall back to the default highway when the id
+ *  no longer resolves. The real one's auto/venue/WebGL2 branches are out of
+ *  scope for the ids this suite restores. */
+function hostSetViz(id) {
+    const factory = global.window['feedBackViz_' + id];
+    return pageHighway.setRenderer(typeof factory === 'function' ? factory() : null);
+}
+
 global.window = {
     // Pre-set so the IIFE's DOMContentLoaded/init() bootstrap is skipped, as
     // in the other suites: init() wants a real document and a real screen.
     __feedBackLyricsKaraokeHooksInstalled: true,
     feedBack: bus,
     highway: pageHighway,
+    setViz: hostSetViz,
     addEventListener() {},
     devicePixelRatio: 1,
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
@@ -811,48 +828,128 @@ test('a pending transfer retry cannot take the device after its target dies', as
 });
 // ── Fullscreen renderer restore (#47) ────────────────────────────────────
 
+/** Hand `fn` the `vizSelection` the host's picker persists — the id fullscreen
+ *  exit re-installs — without leaking it into the next test. Every other key
+ *  reads as absent, and so does `vizSelection` when `id` is null. */
+function withVizSelection(id, fn) {
+    const store = global.localStorage;
+    const original = store.getItem;
+    store.getItem = (key) => (key === 'vizSelection' ? id : null);
+    try { return fn(); } finally { store.getItem = original; }
+}
 
-// ── Fullscreen renderer restore (#47) ────────────────────────────────────
+test('fullscreen enter saves the persisted viz selection and exit re-installs it', () => {
+    withVizSelection('highway_3d', () => {
+        window.feedBackViz_highway_3d = () => ({ name: 'highway_3d', draw() {}, destroy() {} });
+        pageHighway.setRenderer(window.feedBackViz_highway_3d());
+        const previous = pageHighway.current;
 
-test('fullscreen enter saves the previous renderer and exit restores it', () => {
-    const previousRenderer = { draw() {}, destroy() {} };
-    pageHighway.setRenderer(previousRenderer);
-    assert.strictEqual(pageHighway.current, previousRenderer);
+        screen.setKaraokeMode(true);
+        window.feedBackViz_lyrics_karaoke = () => ({ name: 'lyrics_karaoke', draw() {}, destroy() {} });
 
-    screen.setKaraokeMode(true);
-    window.feedBackViz_lyrics_karaoke = () => ({ draw() {}, destroy() {} });
+        const enter = screen._fullscreenEnterForTest();
+        assert.strictEqual(typeof enter, 'function');
+        enter();
+        assert.strictEqual(pageHighway.current.name, 'lyrics_karaoke',
+            'fullscreen swapped in the karaoke renderer');
+        assert.notStrictEqual(pageHighway.current, previous,
+            'fullscreen swapped in a different renderer');
 
-    const enter = screen._fullscreenEnterForTest();
-    assert.strictEqual(typeof enter, 'function');
-    enter();
-    assert.notStrictEqual(pageHighway.current, previousRenderer,
-        'fullscreen swapped in a different renderer');
-    assert.ok(pageHighway.current, 'fullscreen renderer is set');
+        const exit = screen._fullscreenExitForTest();
+        assert.strictEqual(typeof exit, 'function');
+        exit();
+        assert.strictEqual(pageHighway.current.name, 'highway_3d',
+            'exiting fullscreen re-installs the selection that was active before entering');
+        assert.notStrictEqual(pageHighway.current, previous,
+            'the host rebuilds from the id — the outgoing renderer was destroyed on the way in');
 
-    const exit = screen._fullscreenExitForTest();
-    assert.strictEqual(typeof exit, 'function');
-    exit();
-    assert.strictEqual(pageHighway.current, previousRenderer,
-        'exiting fullscreen restores the renderer that was active before entering');
-
-    screen.setKaraokeMode(false);
+        screen.setKaraokeMode(false);
+    });
 });
 
-test('fullscreen exit with no previous renderer sets null', () => {
-    pageHighway.setRenderer(null);
-    assert.strictEqual(pageHighway.current, null);
+test('fullscreen exit re-installs a second named renderer, not just the 3D highway', () => {
+    withVizSelection('keys_highway_3d', () => {
+        window.feedBackViz_keys_highway_3d = () => ({ name: 'keys_highway_3d', draw() {}, destroy() {} });
+        pageHighway.setRenderer(window.feedBackViz_keys_highway_3d());
 
-    screen.setKaraokeMode(true);
-    window.feedBackViz_lyrics_karaoke = () => ({ draw() {}, destroy() {} });
+        screen.setKaraokeMode(true);
+        window.feedBackViz_lyrics_karaoke = () => ({ name: 'lyrics_karaoke', draw() {}, destroy() {} });
 
-    const enter = screen._fullscreenEnterForTest();
-    enter();
-    assert.ok(pageHighway.current, 'fullscreen renderer is set');
+        const enter = screen._fullscreenEnterForTest();
+        enter();
+        assert.strictEqual(pageHighway.current.name, 'lyrics_karaoke');
 
-    const exit = screen._fullscreenExitForTest();
-    exit();
-    assert.strictEqual(pageHighway.current, null,
-        'no previous renderer means exit sets null, same as before');
+        const exit = screen._fullscreenExitForTest();
+        exit();
+        assert.strictEqual(pageHighway.current.name, 'keys_highway_3d',
+            'exiting fullscreen re-installs the Keys Highway selection');
 
-    screen.setKaraokeMode(false);
+        screen.setKaraokeMode(false);
+    });
+});
+
+test('fullscreen exit falls back to the default highway when the previous id no longer resolves', () => {
+    // No factory is registered for this id: the viz was uninstalled while
+    // fullscreen was up, which #47 asks to handle without an error.
+    withVizSelection('uninstalled_viz', () => {
+        screen.setKaraokeMode(true);
+        window.feedBackViz_lyrics_karaoke = () => ({ name: 'lyrics_karaoke', draw() {}, destroy() {} });
+
+        const enter = screen._fullscreenEnterForTest();
+        enter();
+        assert.strictEqual(pageHighway.current.name, 'lyrics_karaoke');
+
+        const exit = screen._fullscreenExitForTest();
+        exit();
+        assert.strictEqual(pageHighway.current, null,
+            'an id the host can no longer resolve leaves the default highway active');
+
+        screen.setKaraokeMode(false);
+    });
+});
+
+test('fullscreen exit with no persisted selection sets null', () => {
+    withVizSelection(null, () => {
+        pageHighway.setRenderer(null);
+        assert.strictEqual(pageHighway.current, null);
+
+        screen.setKaraokeMode(true);
+        window.feedBackViz_lyrics_karaoke = () => ({ name: 'lyrics_karaoke', draw() {}, destroy() {} });
+
+        const enter = screen._fullscreenEnterForTest();
+        enter();
+        assert.ok(pageHighway.current, 'fullscreen renderer is set');
+
+        const exit = screen._fullscreenExitForTest();
+        exit();
+        assert.strictEqual(pageHighway.current, null,
+            'nothing persisted means exit sets null, same as before');
+
+        screen.setKaraokeMode(false);
+    });
+});
+
+test('blocked storage still restores through the picker selection', () => {
+    const store = global.localStorage;
+    const original = store.getItem;
+    store.getItem = () => { throw new Error('storage blocked'); };
+    HOST_DOM['viz-picker'] = { value: 'highway_3d' };
+    try {
+        window.feedBackViz_highway_3d = () => ({ name: 'highway_3d', draw() {}, destroy() {} });
+        screen.setKaraokeMode(true);
+        window.feedBackViz_lyrics_karaoke = () => ({ name: 'lyrics_karaoke', draw() {}, destroy() {} });
+
+        const enter = screen._fullscreenEnterForTest();
+        enter();
+        assert.strictEqual(pageHighway.current.name, 'lyrics_karaoke');
+
+        const exit = screen._fullscreenExitForTest();
+        exit();
+        assert.strictEqual(pageHighway.current.name, 'highway_3d',
+            'the picker select is the fallback when localStorage cannot be read');
+    } finally {
+        store.getItem = original;
+        delete HOST_DOM['viz-picker'];
+        screen.setKaraokeMode(false);
+    }
 });

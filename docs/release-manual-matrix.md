@@ -273,9 +273,11 @@ Recorded 2026-10-06 on `main` at commit `0eaebf6`: **130 pytest cases and
 `npm test`). These pin the four "no known bug" criteria against the stub
 host, so the rows above only re-confirm them on a real one.
 
-Recorded 2026-10-07 on `main` at commit `58e950a` in release PR
-[#55](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/pull/55):
-**131 pytest cases (including `test_rollback.py`) and 215 `node --test`
+Recorded 2026-10-07 on release PR
+[#55](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/pull/55),
+branched from `main` at commit `58e950a`: **131 pytest cases (including
+`test_rollback.py`) and 220 `node --test` cases, all green**
+(`python -m pytest -q tests`, `npm test`). The rollback case
 `test_rollback_hashes_survive_plugin_swap` loads `v1.12.0`'s `routes.py`
 from the git tree as a separate module, prepares directory-form and
 zip-form packs under the release candidate, hashes the sidecars, swaps
@@ -382,7 +384,7 @@ private song titles, and microphone device names before sharing.
 - [ ] No known microphone leak, duplicate renderer, stale timer, or
       cross-panel state issue remains.
 - [x] CI passes from a clean checkout (`python -m pytest tests` — 131
-      cases; `npm test` — 215 cases; `npm run lint`).
+      cases; `npm test` — 220 cases; `npm run lint`).
 - [x] Rollback is verified in `tests/test_rollback.py` — the release
       candidate can be rolled back to `v1.12.0` without changing prepared
       song data. The remaining checklist item is recording the actual
