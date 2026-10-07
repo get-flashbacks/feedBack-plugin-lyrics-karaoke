@@ -21,14 +21,12 @@ import hashlib
 import importlib.util
 import json
 import logging
-import os
 import subprocess
 import sys
 import types
 import zipfile
 from pathlib import Path
 
-import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -212,7 +210,7 @@ def _sidecars_zip(pack_path: Path):
 
 
 def _read_routes(client, name):
-    base = f"/api/plugins/lyrics_karaoke"
+    base = "/api/plugins/lyrics_karaoke"
     r_status = client.get(f"{base}/status", params={"filename": name})
     r_data = client.get(f"{base}/data", params={"filename": name})
     r_playback = client.get(f"{base}/playback", params={"filename": name})
