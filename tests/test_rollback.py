@@ -210,11 +210,27 @@ def _sidecars_zip(pack_path: Path):
 
 
 def _read_routes(client, name):
+    """Fetch status/data/playback for a pack and return parsed responses."""
     base = "/api/plugins/lyrics_karaoke"
     r_status = client.get(f"{base}/status", params={"filename": name})
     r_data = client.get(f"{base}/data", params={"filename": name})
     r_playback = client.get(f"{base}/playback", params={"filename": name})
     return r_status, r_data, r_playback
+
+
+def _assert_opened(s, d, p, name):
+    """Status/data/playback must all load the prepared pack.
+
+    ``/status`` returns 200 even when the target is not a sloppak, so the
+    sloppak flag is checked explicitly; ``/data`` and ``/playback`` 404 on a
+    non-sloppak or a missing sidecar, so their payloads must be non-empty.
+    """
+    assert s.status_code == 200, f"{name}: /status {s.status_code} {s.text}"
+    assert s.json().get("is_sloppak"), f"{name}: /status not a sloppak"
+    assert d.status_code == 200, f"{name}: /data {d.status_code} {d.text}"
+    assert d.json().get("tokens"), f"{name}: /data empty payload"
+    assert p.status_code == 200, f"{name}: /playback {p.status_code} {p.text}"
+    assert p.json().get("voices"), f"{name}: /playback empty payload"
 
 
 # ── The test ─────────────────────────────────────────────────────────────────
@@ -257,9 +273,7 @@ def test_rollback_hashes_survive_plugin_swap(tmp_path, monkeypatch):
     # ── Step 2: open all packs under HEAD (simulating current plugin) ─────────
     for name in ("candidate-dir.sloppak", "candidate-zip.sloppak", "legacy-dir.sloppak"):
         s, d, p = _read_routes(client, name)
-        assert s.status_code == 200
-        assert d.status_code in (200, 404)
-        assert p.status_code in (200, 404)
+        _assert_opened(s, d, p, name)
 
     after_dir_head = _sidecars_dir(candidate_dir)
     after_zip_head = _sidecars_zip(candidate_zip)
@@ -276,36 +290,32 @@ def test_rollback_hashes_survive_plugin_swap(tmp_path, monkeypatch):
     # v1.12.0 does `from dlc_paths import _resolve_dlc_path` inside
     # _resolve_sloppak, so dlc_paths must be present — _wire_host does this.
 
+    for name in ("candidate-dir.sloppak", "candidate-zip.sloppak", "legacy-dir.sloppak"):
+        s, d, p = _read_routes(client_v1120, name)
+        _assert_opened(s, d, p, name)
+
     after_dir_rollback = _sidecars_dir(candidate_dir)
     after_zip_rollback = _sidecars_zip(candidate_zip)
     after_legacy_rollback = _sidecars_dir(legacy_dir)
 
-    assert after_dir_rollback == before_dir, "directory-form sidecar hash changed under v1.12.0"
-    assert after_zip_rollback == before_zip, "zip-form sidecar hash changed under v1.12.0"
-    assert after_legacy_rollback == before_legacy, "legacy dir sidecar hash changed under v1.12.0"
-
-    for name in ("candidate-dir.sloppak", "candidate-zip.sloppak", "legacy-dir.sloppak"):
-        s, d, p = _read_routes(client_v1120, name)
-        assert s.status_code == 200
-        assert d.status_code in (200, 404)
-        assert p.status_code in (200, 404)
+    assert after_dir_rollback == after_dir_head, "directory-form sidecar hash changed under v1.12.0"
+    assert after_zip_rollback == after_zip_head, "zip-form sidecar hash changed under v1.12.0"
+    assert after_legacy_rollback == after_legacy_head, "legacy dir sidecar hash changed under v1.12.0"
 
     # ── Step 4: roll forward to HEAD and reopen again ─────────────────────────
     client_forward = _wire_host(head_routes, tmp_path, library, "test.rollback.forward")
+
+    for name in ("candidate-dir.sloppak", "candidate-zip.sloppak", "legacy-dir.sloppak"):
+        s, d, p = _read_routes(client_forward, name)
+        _assert_opened(s, d, p, name)
 
     after_dir_forward = _sidecars_dir(candidate_dir)
     after_zip_forward = _sidecars_zip(candidate_zip)
     after_legacy_forward = _sidecars_dir(legacy_dir)
 
-    assert after_dir_forward == before_dir, "directory-form sidecar hash changed on roll forward"
-    assert after_zip_forward == before_zip, "zip-form sidecar hash changed on roll forward"
-    assert after_legacy_forward == before_legacy, "legacy dir sidecar hash changed on roll forward"
-
-    for name in ("candidate-dir.sloppak", "candidate-zip.sloppak", "legacy-dir.sloppak"):
-        s, d, p = _read_routes(client_forward, name)
-        assert s.status_code == 200
-        assert d.status_code in (200, 404)
-        assert p.status_code in (200, 404)
+    assert after_dir_forward == after_dir_rollback, "directory-form sidecar hash changed on roll forward"
+    assert after_zip_forward == after_zip_rollback, "zip-form sidecar hash changed on roll forward"
+    assert after_legacy_forward == after_legacy_rollback, "legacy dir sidecar hash changed on roll forward"
 
     # ── Step 5: plugin directory was never a write target ────────────────────
     plugin_dir = work / "plugin-dir"
