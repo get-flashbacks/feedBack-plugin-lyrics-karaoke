@@ -10,6 +10,10 @@ and the repository's tagged history.
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected stale comments claiming `lyrics_sync` was superseded/absorbed or a redirect stub. `lyrics_sync` is a separately-maintained plugin with its own manual tap-to-time / waveform-editing surface; this plugin duplicates the alignment/save flow and adds pitch extraction + karaoke overlay. Consolidating the duplicated code is an open follow-up.
+
 ### Added
 
 - The **Karaoke** button's pitch ribbon now draws the highway's features
