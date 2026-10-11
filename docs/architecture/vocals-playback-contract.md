@@ -47,6 +47,13 @@ unpitched. Missing `midi` means “lyrics only”; it is not an error.
   `primary: true` voice when voice data is present.
 - Tokens are sorted by finite `start`. `duration` is finite and
   non-negative; zero-duration tokens are valid cue markers.
+- `midi`, when present, is an integer in the MIDI `0–127` range; an in-range
+  fraction truncates toward zero, an out-of-range one is invalid. Every
+  numeric field is validated for type, finiteness, and range before
+  conversion: a timestamp or duration that is non-numeric, non-finite, or
+  overflowing — including a JSON exponent overflow or the `NaN`/`Infinity`
+  literals Python's decoder accepts — and a MIDI value outside `0–127` is an
+  invalid token record, dropped so its lyric token stays unpitched.
 - Invalid token records are dropped at the boundary. A malformed present
   sidecar file is different: return HTTP 422 rather than silently treating
   it as an unprepared song.
