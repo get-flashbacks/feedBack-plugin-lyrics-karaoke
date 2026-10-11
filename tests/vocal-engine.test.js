@@ -989,6 +989,7 @@ function installHostDom() {
     const parent = {
         children: [],
         insertBefore(node) { this.children.push(node); node.parentNode = this; },
+        appendChild(node) { this.insertBefore(node); },
     };
     const lyricsBtn = { id: 'btn-lyrics', parentNode: parent, nextSibling: null };
     const els = { 'btn-lyrics': lyricsBtn };

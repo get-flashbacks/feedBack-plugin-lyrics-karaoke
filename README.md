@@ -43,11 +43,9 @@ and [#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issue
 in the main player next to the shared 🎤 control — not by the **Karaoke**
 button, which still drives the legacy pitch ribbon. A splitscreen panel that
 already had Lyrics Karaoke saved as its visualization keeps loading the
-renderer too. The renderer's scoring settings still have no in-app control;
-see the settings paragraph under [Play and score](#play-and-score) for what
-is missing, and
-[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63)
-for the control surface that would expose them.
+renderer too. Beside the shared 🎤 control the renderer builds a **Settings**
+control that opens its scoring and voice settings; see the settings paragraph
+under [Play and score](#play-and-score).
 
 ### Core compatibility
 
@@ -181,17 +179,19 @@ pitch; raw audio is not stored or transmitted.
 **Microphone feedback**, **Octave-free pitch match**, **Pitch tolerance**,
 **Mic timing offset**, **Sung part**, and **Left rail** are renderer settings
 whose descriptors used to live in `plugin.json`. That block is gone as of
-1.13.0, so **no host renders a control for any of them**: every panel runs
-on the defaults (tolerance 1 semitone, octave-free off, mic offset 0 ms,
-microphone feedback on, sung part `primary`, left rail `absolute`).
-Tolerance, octave-free matching and mic offset are one shared document in
-`localStorage` under `lyrics_karaoke.prefs.v1`, seeded once from Karaoke
-Highway's `vocals_highway.*` keys when it does not exist yet, so a
-calibration done there still applies; a fresh install with neither has no
-in-app way to change them, and microphone feedback, sung part and left rail
-have no reachable setter at all. Exposing them in the karaoke UI is tracked
-in
-[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
+1.13.0, so no host renders a control for them — the renderer builds its own
+**Settings** popover instead (next to the **Fullscreen** control) whenever an
+instance is live. Panels start on the defaults (tolerance 1 semitone,
+octave-free off, mic offset 0 ms, microphone feedback on, sung part `primary`,
+left rail `absolute`). Tolerance, octave-free matching and mic offset are
+shared: the **Settings** popover applies them to every panel and the legacy
+overlay at once and writes them to the one `localStorage` document under
+`lyrics_karaoke.prefs.v1`, seeded once from Karaoke Highway's
+`vocals_highway.*` keys when it does not exist yet, so a calibration done there
+still applies. **Live scoring** is shared too — one switch pauses scoring for
+every panel — while sung part and left rail stay per panel and follow the
+scoring panel. Opening the popover never starts the microphone; capture still
+starts only from the 🎤 click.
 
 ## Fallback, migration, and rollback
 
@@ -212,7 +212,7 @@ back to a compatible Lyrics Karaoke release.
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
-| Voice appears late or early | Scoring runs on the engine's mic offset. There is no control for it in 1.13.0 — edit the value in `lyrics_karaoke.prefs.v1` (see the user guide's [Settings](docs/user-guide.md#settings-with-no-control-today) section); a control is tracked in [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63). |
+| Voice appears late or early | Open the renderer's **Settings** popover and nudge **Mic delay**; the change applies live (see the user guide's [Scoring and voice settings](docs/user-guide.md#scoring-and-voice-settings) section). |
 | Build Karaoke rejects the save | The alignment result had no usable segments (missing or invalid start/end times). Existing lyrics are left untouched, so re-run alignment. A partial result still saves its usable segments and the response reports how many were dropped. |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; the renderer reports malformed packs separately from missing ones. |
 

@@ -460,6 +460,7 @@
         // the button order is stable; refreshMicUi() handles visibility.
         ensureMicButton();
         ensureFullscreenButton();
+        ensureSettingsButton();
     }
 
     function refreshButtonState() {
@@ -468,6 +469,9 @@
         // updated together so toggling/hiding can't desync.
         refreshMicUi();
         refreshFullscreenButton();
+        // The settings surface tracks the live renderer, independent of
+        // the legacy overlay's eligibility.
+        _vizRefreshSettingsUi();
     }
 
     function refreshKaraokeToggle() {
@@ -3238,6 +3242,8 @@
         if (!_vizInstances.has(next) || !next.canScore()) return Promise.resolve(false);
         const owner = _vizMicOwnerInstance();
         _vizPreferredMicTarget = next;
+        // Part/rail controls follow the scored panel.
+        _vizRefreshSettingsUi();
         if (transferActive && owner && owner !== next) {
             owner.releaseMic();
             return _vizRequestMicWithSettle(next);
@@ -3372,6 +3378,330 @@
         const target = _vizMicTarget();
         if (!target) return Promise.resolve(false);
         return target.requestMic();
+    }
+
+    // ── Karaoke settings popover (#63) ──────────────────────────────────
+    //
+    // Reachable controls for the scoring/voice keys whose manifest
+    // descriptors were retired with the viz picker (#44). The renderer
+    // still honours applySetting(); this is a front door to it.
+    //
+    // Scope is deliberate. Scoring keys (tolerance / octaveIndependent /
+    // micOffsetMs) are SHARED: _lkPrefs is the single source for every live
+    // panel plus the legacy overlay, so a change here applies to all of
+    // them and is persisted by _lkUpdatePrefs. Mic feedback, sung part and
+    // left rail are PANEL-LOCAL and apply only to the panel the microphone
+    // is scoring (or the first live panel when none can score yet).
+    //
+    // Opening or refreshing this surface NEVER requests the microphone;
+    // capture keeps exactly one explicit entry point (the 🎤 click).
+    const VIZ_SETTING_CONTROLS = [
+        {
+            key: 'micFeedback', kind: 'toggle', scope: 'shared',
+            label: 'Live scoring',
+            title: 'Score the karaoke panels with the shared microphone. Shared by every panel; turning it off releases capture, and starting it always needs the 🎤 click.',
+        },
+        {
+            key: 'tolerance', kind: 'range', scope: 'shared',
+            label: 'Pitch tolerance', min: 0.25, max: 3, step: 0.25, unit: 'semitones',
+            title: 'How far off a note can be before it stops scoring. Higher is more forgiving.',
+        },
+        {
+            key: 'octaveIndependent', kind: 'toggle', scope: 'shared',
+            label: 'Ignore octave',
+            title: 'Count a note correct even when it is sung an octave high or low.',
+        },
+        {
+            key: 'micOffsetMs', kind: 'range', scope: 'shared',
+            label: 'Mic delay', min: -1000, max: 1000, step: 10, unit: 'ms',
+            title: 'Shift the microphone timeline to cancel audio latency. Nudge until your notes line up.',
+        },
+        {
+            key: 'sungPart', kind: 'voice', scope: 'instance',
+            label: 'Sung part',
+            title: 'Which vocal part this panel scores and draws. Options come from the loaded song.',
+        },
+        {
+            key: 'leftRailMode', kind: 'select', scope: 'instance',
+            label: 'Left rail',
+            options: [['absolute', 'Absolute tuner'], ['technique', 'Technique'], ['off', 'Off']],
+            title: 'What the left rail shows: an absolute pitch tuner, technique coaching, or nothing.',
+        },
+    ];
+
+    const SETTINGS_PANEL_STYLE = 'position:absolute;z-index:60;min-width:16rem;max-width:20rem;'
+        + 'background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:8px;'
+        + 'padding:10px 12px;box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:12px;text-align:left;';
+
+    let _vizSettingsBtn = null;
+    let _vizSettingsUi = null;
+
+    function _vizSettingDescriptor(key) {
+        for (const d of VIZ_SETTING_CONTROLS) if (d.key === key) return d;
+        return null;
+    }
+
+    /** The panel a voice/rail control edits: the mic target when one exists,
+     *  else the first live panel (a lyrics-only panel can't score but can
+     *  still choose which part to draw). */
+    function _vizSettingsTarget() {
+        const preferred = _vizMicTarget();
+        if (preferred && _vizInstances.has(preferred)) return preferred;
+        for (const inst of _vizInstances) return inst;
+        return null;
+    }
+
+    /** A part that no longer exists (single-voice payload, a voice dropped
+     *  between songs) falls back to the primary rather than scoring an
+     *  empty take. */
+    function _vizSanitizeSungPart(part, count) {
+        const match = /^part([2-4])$/.exec(String(part || ''));
+        if (!match) return 'primary';
+        const n = Number(match[1]);
+        return (n >= 2 && n <= count) ? ('part' + n) : 'primary';
+    }
+
+    /** Select options for a panel's scored voice, keyed the way
+     *  _vizSelectedVoiceIndex consumes them (primary, part2, part3, part4).
+     *  Capped at the four parts that resolver can address, so the menu never
+     *  offers a value that sanitizes back to `primary` and silently no-ops.
+     *  Labels prefer the payload's human name. */
+    function _vizVoiceOptions(target) {
+        if (!target || typeof target.getVoices !== 'function') return [];
+        const voices = target.getVoices();
+        if (!voices.length) return [];
+        const pIdx = Math.max(0, voices.findIndex((v) => v.primary));
+        const ordered = [pIdx];
+        for (let i = 0; i < voices.length; i++) if (i !== pIdx) ordered.push(i);
+        return ordered.slice(0, 4).map((idx, pos) => {
+            const v = voices[idx];
+            return {
+                value: pos === 0 ? 'primary' : 'part' + (pos + 1),
+                label: v.name || v.id || ('Part ' + (pos + 1)),
+            };
+        });
+    }
+
+    function ensureSettingsButton() {
+        if (_vizSettingsBtn) return;
+        if (!toggleBtn || !toggleBtn.parentNode) return;
+        const parent = toggleBtn.parentNode;
+        const anchor = (fullscreenBtn && fullscreenBtn.parentNode === parent) ? fullscreenBtn : toggleBtn;
+        _vizSettingsBtn = document.createElement('button');
+        _vizSettingsBtn.id = 'btn-karaoke-settings';
+        _vizSettingsBtn.type = 'button';
+        _vizSettingsBtn.className = BTN_CLASS_PROMPT;
+        _vizSettingsBtn.textContent = 'Settings';
+        _vizSettingsBtn.title = 'Karaoke scoring and voice settings';
+        _vizSettingsBtn.setAttribute('aria-label', 'Karaoke settings');
+        _vizSettingsBtn.setAttribute('aria-haspopup', 'true');
+        _vizSettingsBtn.setAttribute('aria-expanded', 'false');
+        _vizSettingsBtn.addEventListener('click', _vizToggleSettings);
+        anchor.parentNode.insertBefore(_vizSettingsBtn, anchor.nextSibling);
+        _vizSettingsBtn.style.display = 'none';
+        _vizSettingsUi = _vizBuildSettingsPopover(parent);
+    }
+
+    function _vizBuildSettingsPopover(parent) {
+        const root = document.createElement('div');
+        root.id = 'lk-viz-settings';
+        root.setAttribute('role', 'dialog');
+        root.setAttribute('aria-label', 'Karaoke settings');
+        root.style.cssText = SETTINGS_PANEL_STYLE;
+        root.style.display = 'none';
+
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;';
+        const title = document.createElement('span');
+        title.textContent = 'Karaoke settings';
+        title.style.fontWeight = '600';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = '×';
+        close.setAttribute('aria-label', 'Close karaoke settings');
+        close.style.cssText = 'background:none;border:0;color:#9ca3af;font-size:16px;cursor:pointer;line-height:1;';
+        close.addEventListener('click', () => _vizSetSettingsOpen(false));
+        head.appendChild(title);
+        head.appendChild(close);
+        root.appendChild(head);
+
+        const rows = {};
+        for (const desc of VIZ_SETTING_CONTROLS) {
+            rows[desc.key] = _vizBuildSettingRow(root, desc);
+        }
+
+        const hint = document.createElement('div');
+        hint.style.cssText = 'margin-top:8px;color:#9ca3af;font-size:10px;';
+        hint.textContent = 'Live scoring and pitch settings are shared by every karaoke panel. Part and rail apply to the scored panel.';
+        root.appendChild(hint);
+
+        parent.appendChild(root);
+        return { root, close, rows, open: false };
+    }
+
+    function _vizBuildSettingRow(root, desc) {
+        const row = document.createElement('label');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:3px 0;cursor:pointer;';
+        row.title = desc.title || '';
+        const name = document.createElement('span');
+        name.textContent = desc.label;
+        row.appendChild(name);
+
+        const wrap = document.createElement('span');
+        wrap.style.cssText = 'display:inline-flex;align-items:center;gap:6px;';
+
+        let input;
+        if (desc.kind === 'toggle') {
+            input = document.createElement('input');
+            input.type = 'checkbox';
+        } else if (desc.kind === 'range') {
+            input = document.createElement('input');
+            input.type = 'range';
+            input.min = String(desc.min);
+            input.max = String(desc.max);
+            input.step = String(desc.step || 1);
+        } else {
+            input = document.createElement('select');
+            input.setAttribute('style', 'font-size:11px;max-width:9rem;background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:1px 2px;');
+            for (const [value, label] of (desc.options || [])) {
+                const opt = document.createElement('option');
+                opt.value = value;
+                opt.textContent = label;
+                input.appendChild(opt);
+            }
+        }
+        input.setAttribute('aria-label', desc.label);
+        input.addEventListener(desc.kind === 'range' ? 'input' : 'change', () => _vizOnSettingInput(desc.key));
+        wrap.appendChild(input);
+
+        let readout = null;
+        if (desc.kind === 'range') {
+            readout = document.createElement('span');
+            readout.setAttribute('aria-live', 'polite');
+            readout.style.cssText = 'min-width:3.5rem;text-align:right;color:#9ca3af;font-variant-numeric:tabular-nums;';
+            wrap.appendChild(readout);
+        }
+
+        row.appendChild(wrap);
+        root.appendChild(row);
+        return { desc, input, readout, voicesKey: '' };
+    }
+
+    function _vizOnSettingInput(key) {
+        if (!_vizSettingsUi) return;
+        const row = _vizSettingsUi.rows[key];
+        if (!row) return;
+        const desc = row.desc;
+        let value;
+        if (desc.kind === 'toggle') value = row.input.checked;
+        else if (desc.kind === 'range') value = _lkClampNumber(row.input.value, desc.min, desc.max, VIZ_SETTING_DEFAULTS[key]);
+        else value = row.input.value;
+        _vizApplySettingValue(key, value);
+        _vizRefreshSettingsUi();
+    }
+
+    function _vizApplySettingValue(key, value) {
+        const desc = _vizSettingDescriptor(key);
+        if (!desc) return false;
+        let targets;
+        if (desc.scope === 'shared') {
+            targets = Array.from(_vizInstances);
+        } else {
+            const target = _vizSettingsTarget();
+            targets = target ? [target] : [];
+        }
+        let any = false;
+        for (const inst of targets) {
+            if (inst.applySetting(key, value)) any = true;
+        }
+        return any;
+    }
+
+    function _vizSetSettingsOpen(open) {
+        if (!_vizSettingsUi) return;
+        _vizSettingsUi.open = !!open;
+        _vizSettingsUi.root.style.display = _vizSettingsUi.open ? '' : 'none';
+        if (_vizSettingsBtn) _vizSettingsBtn.setAttribute('aria-expanded', _vizSettingsUi.open ? 'true' : 'false');
+        if (_vizSettingsUi.open) _vizRefreshSettingsUi();
+    }
+
+    function _vizToggleSettings(e) {
+        if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+        if (!_vizSettingsUi) return;
+        _vizSetSettingsOpen(!_vizSettingsUi.open);
+    }
+
+    function _vizSettingReadout(desc, raw) {
+        const n = Number(raw);
+        if (!isFinite(n)) return String(raw);
+        if (desc.unit === 'ms') return (n > 0 ? '+' : '') + Math.round(n) + ' ms';
+        return (Math.round(n * 100) / 100) + ' st';
+    }
+
+    function _vizPopulateVoiceOptions(row, target) {
+        const options = _vizVoiceOptions(target);
+        const key = options.map((o) => o.value + ':' + o.label).join('|');
+        if (key !== row.voicesKey) {
+            row.voicesKey = key;
+            while (row.input.firstChild) row.input.removeChild(row.input.firstChild);
+            for (const o of options) {
+                const opt = document.createElement('option');
+                opt.value = o.value;
+                opt.textContent = o.label;
+                row.input.appendChild(opt);
+            }
+        }
+        const current = target.getSetting('sungPart');
+        const has = options.some((o) => o.value === current);
+        row.input.value = has ? current : (options[0] ? options[0].value : '');
+        row.input.disabled = options.length < 1;
+        row.input.title = options.length < 2
+            ? 'This song has a single part to score'
+            : (row.desc.title || '');
+    }
+
+    /** The cluster only belongs on screen while the highway is visible and a
+     *  live panel can answer for it. */
+    function _vizSettingsVisible(target) {
+        if (!target) return false;
+        if (typeof window === 'undefined' || !window.highway || typeof window.highway.isVisible !== 'function') return true;
+        return window.highway.isVisible();
+    }
+
+    /** Push one descriptor's live value into its control. */
+    function _vizSyncSettingRow(row, desc, target) {
+        const value = target.getSetting(desc.key);
+        const resolved = value === undefined ? VIZ_SETTING_DEFAULTS[desc.key] : value;
+        if (desc.kind === 'toggle') {
+            row.input.checked = resolved !== false;
+        } else if (desc.kind === 'range') {
+            row.input.value = String(resolved);
+            if (row.readout) row.readout.textContent = _vizSettingReadout(desc, row.input.value);
+        } else if (desc.kind === 'voice') {
+            _vizPopulateVoiceOptions(row, target);
+        } else {
+            row.input.value = String(resolved);
+        }
+    }
+
+    function _vizSyncSettingRows(target) {
+        for (const desc of VIZ_SETTING_CONTROLS) {
+            const row = _vizSettingsUi.rows[desc.key];
+            if (row) _vizSyncSettingRow(row, desc, target);
+        }
+    }
+
+    function _vizRefreshSettingsUi() {
+        if (!_vizSettingsBtn || !_vizSettingsUi) return;
+        const target = _vizSettingsTarget();
+        const show = _vizSettingsVisible(target);
+        _vizSettingsBtn.style.display = show ? '' : 'none';
+        if (!show) {
+            if (_vizSettingsUi.open) _vizSetSettingsOpen(false);
+            return;
+        }
+        if (!_vizSettingsUi.open) return;
+        _vizSyncSettingRows(target);
     }
 
     // Set when a provider instance turned the legacy overlay off, so the
@@ -4597,6 +4927,9 @@
         }
 
         function selectVoice() {
+            // Self-heal a part that vanished with a song switch: store the
+            // primary so getSetting() matches what is actually scored.
+            settings.sungPart = _vizSanitizeSungPart(settings.sungPart, voices.length);
             scoredIdx = _vizSelectedVoiceIndex(voices, settings.sungPart);
             tokens = scoredIdx >= 0 ? voices[scoredIdx].tokens : [];
             // A different part is a different take: results never carry over.
@@ -4692,6 +5025,7 @@
                 selectVoice();
                 loadedKey = key;
                 _vizRefreshMicUi();   // the 🎤 target may only now exist
+                _vizRefreshSettingsUi();   // …and the voice list only now exists
                 _vizEmit('lyrics_karaoke:renderer-ready', {
                     filename,
                     arrangementIndex: arrIndex,
@@ -4831,6 +5165,15 @@
 
                 if (!initialized) {
                     initialized = true;
+                    // `micFeedback` is shared but not persisted; a panel that
+                    // appears after the user switched live scoring off adopts
+                    // the live value instead of re-enabling itself at the
+                    // default (the three scoring keys already inherit through
+                    // the prefs document).
+                    for (const other of _vizInstances) {
+                        this.applySetting('micFeedback', other.getSetting('micFeedback') !== false);
+                        break;
+                    }
                     _vizInstances.add(this);
                     // Exactly one owner of playback at a time (#10) —
                     // covering the legacy overlay and note_detect.
@@ -4853,6 +5196,7 @@
                     bus.on('highway:visibility', visibilityHandler);
                 }
                 _vizRefreshMicUi();
+                _vizRefreshSettingsUi();
 
                 if (bundle && bundle.songInfo) load(bundle.songInfo);
             },
@@ -4910,6 +5254,7 @@
                 }
                 _vizInstances.delete(this);
                 _vizRefreshMicUi();
+                _vizRefreshSettingsUi();
                 // Last one out hands playback back to whoever we displaced.
                 if (wasInitialized) _vizReleasePlaybackOwnership();
             },
@@ -4919,13 +5264,19 @@
             // REQUIRED of any provider that declares a settings list.
             applySetting(key, value) {
                 if (!Object.prototype.hasOwnProperty.call(VIZ_SETTING_DEFAULTS, key)) return false;
-                settings[key] = value;
                 if (key === 'sungPart' && voices.length) {
+                    // A part the payload no longer carries (a voice dropped
+                    // between songs, a single-voice arrangement) falls back
+                    // to the primary instead of scoring an empty take.
+                    settings[key] = _vizSanitizeSungPart(value, voices.length);
                     // New part, new take: stop scoring the old one's mic too.
                     releaseMic();
                     selectVoice();
                     _vizRefreshMicUi();
+                    _vizRefreshSettingsUi();
+                    return true;
                 }
+                settings[key] = value;
                 if (key === 'tolerance' || key === 'octaveIndependent' || key === 'micOffsetMs') {
                     // Live, no reset: calibrating mid-take is the point.
                     scorer.setSettings({ [key]: value });
@@ -4948,6 +5299,13 @@
                 return Object.prototype.hasOwnProperty.call(settings, key)
                     ? settings[key]
                     : undefined;
+            },
+
+            /** Normalized voices for the loaded payload, in payload order.
+             *  Read by the #63 settings popover to build the sung-part list;
+             *  returns a shallow copy so callers can't mutate panel state. */
+            getVoices() {
+                return voices.map((v) => ({ id: v.id, name: v.name, primary: v.primary }));
             },
 
             // ── Not part of the setRenderer contract (#11) ──
@@ -5165,6 +5523,21 @@
             _vizOnMicClick,
             _vizMicTarget,
             _vizSelectMicTarget,
+            // #63: the karaoke settings popover. Built from the legacy
+            // cluster (ensureToggleButton → ensureSettingsButton) so a stub
+            // host can drive open/close/change exactly as a user would.
+            _vizSettingsUi: {
+                controls: VIZ_SETTING_CONTROLS,
+                ensureSettingsButton,
+                refresh: _vizRefreshSettingsUi,
+                target: _vizSettingsTarget,
+                open: () => !!(_vizSettingsUi && _vizSettingsUi.open),
+                isOpen: () => !!(_vizSettingsUi && _vizSettingsUi.open),
+                toggle: _vizToggleSettings,
+                setOpen: _vizSetSettingsOpen,
+                button: () => _vizSettingsBtn,
+                panel: () => _vizSettingsUi,
+            },
         };
     }
 })();
