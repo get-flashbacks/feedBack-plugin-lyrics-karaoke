@@ -823,36 +823,71 @@ def _atomic_write_json(path: Path, payload) -> None:
     tmp.replace(path)
 
 
+class LyricsPersistenceError(Exception):
+    """Raised when alignment segments can't yield a usable ``lyrics.json``.
+
+    Carries the HTTP status the route should return. Raised BEFORE any
+    sidecar, manifest, or archive write, so a malformed request can never
+    overwrite an existing lyrics sidecar with an empty one.
+    """
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 def _persist_lyrics(
     source_dir: Path,
     manifest: dict,
     segments: list[dict],
     dlc_path: Path,
     is_zip: bool,
-) -> int:
+) -> tuple[int, int]:
     """Convert alignment segments to the sloppak lyrics format and persist.
 
-    Returns the number of lyric entries written.
+    Returns ``(written, dropped)``.
+
+    Unusable segments are dropped rather than failing the whole request,
+    mirroring the tolerant per-token reads in `_lyrics_tokens` — one bad row
+    from the aligner shouldn't blank a song. A *partial* result is therefore
+    accepted, with the ``dropped`` count surfaced to the caller, but a result
+    where every entry is unusable (empty, wrong shape, non-finite times, or
+    non-positive duration) raises `LyricsPersistenceError` instead of writing
+    ``[]`` over the existing sidecar. The check runs before the sidecar,
+    manifest, or archive is touched, so a rejected save is a true no-op.
     """
     lyrics_data = []
+    dropped = 0
     for seg in segments:
         if not isinstance(seg, dict):
+            dropped += 1
             continue
         try:
             start = float(seg["start"])
             end = float(seg["end"])
         except (KeyError, TypeError, ValueError):
+            dropped += 1
             continue
         if not math.isfinite(start) or not math.isfinite(end):
+            dropped += 1
             continue
         d = end - start
-        if d <= 0:
+        if not math.isfinite(d) or d <= 0:
+            dropped += 1
             continue
         lyrics_data.append({
             "t": round(start, 3),
             "d": round(d, 3),
             "w": str(seg.get("text", "")),
         })
+
+    if not lyrics_data:
+        raise LyricsPersistenceError(
+            422,
+            f"No usable lyric segments: all {len(segments)} entries were "
+            "invalid (need finite start < end); existing lyrics left untouched",
+        )
 
     _atomic_write_json(source_dir / "lyrics.json", lyrics_data)
 
@@ -862,7 +897,7 @@ def _persist_lyrics(
 
     if is_zip:
         _rezip_sloppak(source_dir, dlc_path)
-    return len(lyrics_data)
+    return len(lyrics_data), dropped
 
 
 def _persist_pitch(
@@ -1141,7 +1176,15 @@ def setup(app: FastAPI, context: dict):
 
     @app.post("/api/plugins/lyrics_karaoke/save-lyrics")
     def lk_save_lyrics(data: dict):
-        """Persist alignment segments as the sloppak's ``lyrics.json``."""
+        """Persist alignment segments as the sloppak's ``lyrics.json``.
+
+        Partial-invalid input is accepted: segments the sanitizer can use are
+        written and the count of dropped entries comes back as
+        ``dropped_count`` (also a warning in the log). A result with *no*
+        usable segment is rejected with 422 before any write, so a malformed
+        alignment can never erase existing lyrics — the response body says
+        so and the pack is left byte-for-byte unchanged.
+        """
         filename = (data or {}).get("filename", "")
         segments = (data or {}).get("segments", []) or []
         if not filename:
@@ -1155,10 +1198,19 @@ def setup(app: FastAPI, context: dict):
         source_dir, manifest, dlc_path, is_zip = resolved
 
         try:
-            count = _persist_lyrics(source_dir, manifest, segments, dlc_path, is_zip)
+            count, dropped = _persist_lyrics(source_dir, manifest, segments, dlc_path, is_zip)
+        except LyricsPersistenceError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": f"Persist failed: {exc}"}, 500)
-        return {"ok": True, "lyrics_count": count}
+        payload = {"ok": True, "lyrics_count": count}
+        if dropped:
+            _log.warning(
+                "save-lyrics: dropped %d unusable segment(s) of %d for %r",
+                dropped, len(segments), filename,
+            )
+            payload["dropped_count"] = dropped
+        return payload
 
     # ── Stage 2: extract per-syllable pitch ───────────────────────────────
 

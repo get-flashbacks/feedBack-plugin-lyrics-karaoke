@@ -12,6 +12,20 @@ and the repository's tagged history.
 
 ### Fixed
 
+- A malformed alignment result can no longer erase existing lyrics
+  ([#59](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/59)).
+  `POST /save-lyrics` sanitizes incoming segments one at a time, so a result
+  whose every entry was unusable (missing or non-finite `start`/`end`, or
+  `end <= start`) was written as `[]` and still reported `{"ok": true}` —
+  destroying valid lyrics, and with no archive backup at all for a
+  directory-form pack. The route now validates the sanitized result before it
+  touches the sidecar, manifest, or archive: an entirely unusable result
+  returns a 422 saying the existing lyrics were left untouched, and the pack
+  is byte-for-byte unchanged. A partial-invalid result is still accepted —
+  the usable segments are written and `dropped_count` reports how many were
+  discarded — so one bad row from the aligner does not block a good save.
+  `tests/test_save_lyrics_validation.py` pins the rejected-save bytes for
+  both directory- and zip-form packs plus the partial and valid paths.
 - Corrected stale comments claiming `lyrics_sync` was superseded/absorbed or a redirect stub. `lyrics_sync` is a separately-maintained plugin with its own manual tap-to-time / waveform-editing surface; this plugin duplicates the alignment/save flow and adds pitch extraction + karaoke overlay. Consolidating the duplicated code is an open follow-up.
 
 ### Added
@@ -37,15 +51,18 @@ and the repository's tagged history.
   syllables after it made the search skip the note being sung. The lookup now
   searches the monotonic `start`, then walks back over the window the longest
   note can reach.
-- **Version stays 1.13.0.** `version-bumped-on-change` will read this as a
-  diff that touches functional code (`screen.js`) without bumping
-  `plugin.json`. That check is intentionally allowed to remain red for this
-  PR because the combined release of #44 and #45 has not shipped yet — the
-  version bump belongs with the release, not with each intermediate
-  sub-issue. The fullscreen fix ([#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47))
+- **The #32 steps left the version at 1.13.0.** `version-bumped-on-change`
+  will read those diffs as functional code (`screen.js`) without a `plugin.json`
+  bump. That check is intentionally allowed to remain red for those PRs because
+  the combined release of #44 and #45 has not shipped yet — the version bump
+  belongs with the release, not with each intermediate sub-issue. The fullscreen
+  fix ([#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47))
   is another step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
   and rides that same deferral. (`plugin.json` was also left at 1.13.0 in
-  commit `41163a3` for #44.)
+  commit `41163a3` for #44.) A later fix in the same unreleased window does
+  bump: the save-validation fix for
+  [#59](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/59)
+  ships `plugin.json` at 1.13.1.
 
 ### Changed
 

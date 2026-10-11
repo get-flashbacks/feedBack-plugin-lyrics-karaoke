@@ -174,6 +174,7 @@ back to a compatible Lyrics Karaoke release.
 | No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
 | Voice appears late or early | Scoring runs on the engine's mic offset. There is no control for it in 1.13.0 — edit the value in `lyrics_karaoke.prefs.v1` (see the user guide's [Settings](docs/user-guide.md#settings-with-no-control-today) section); a control returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
+| Build Karaoke rejects the save | The alignment result had no usable segments (missing or invalid start/end times). Existing lyrics are left untouched, so re-run alignment. A partial result still saves its usable segments and the response reports how many were dropped. |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; the renderer reports malformed packs separately from missing ones. |
 
 ## Development and provenance
