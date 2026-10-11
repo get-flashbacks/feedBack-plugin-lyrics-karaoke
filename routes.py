@@ -864,7 +864,9 @@ def _extract_pitch_via_server(server_url: str, vocals_path: Path, lyrics: list[d
 # primary's stale ``lead.json``. The primary voice also keeps the singular
 # compatibility aliases in sync, because older readers rely on them; a
 # secondary voice never touches the aliases or another track's files. Solo
-# packs (no ``vocal_tracks``) keep the exact legacy behavior and filenames.
+# packs (no ``vocal_tracks``) keep the legacy singular pointers: the solo
+# voice IS the singular aliases, so reads and writes honor whatever file they
+# name.
 
 _DEFAULT_LYRICS_REL = "lyrics.json"
 _DEFAULT_PITCH_REL = "vocal_pitch.json"
@@ -897,37 +899,70 @@ class VoiceTarget:
         self.pitch_rel = pitch_rel
 
 
-def _voice_entries(manifest: dict) -> list[tuple[str, dict]]:
-    """Return ``[(id, entry), ...]`` for the manifest's addressable voices.
+def _track_usable(source_dir: Path, entry: dict) -> bool:
+    """Whether an entry is renderable right now — it has synced lyrics.
 
-    Returns ``[]`` for a solo pack (no usable ``vocal_tracks``). A track with
-    a missing/blank id gets a positional ``v{n}`` fallback so it stays
-    selectable; duplicate ids raise `VoiceTargetError` because voice identity
-    must be unambiguous. Non-mapping entries can't carry pointers or be
-    addressed, so they are skipped.
+    Matches `_canonical_voices`'s inclusion rule: a track with no usable
+    tokens doesn't appear in `/playback`, so it doesn't consume the blank-id
+    numbers below. An unusable track is still addressable (it is precisely the
+    part awaiting preparation), just never miscounted as someone else's id.
+    """
+    return bool(_read_lyrics_tokens(source_dir, entry.get("lyrics")))
+
+
+def _voice_entries(source_dir: Path, manifest: dict) -> list[tuple[str, dict, bool]]:
+    """Return ``[(id, entry, usable), ...]`` for the manifest's voices.
+
+    Returns ``[]`` for a solo pack (no ``vocal_tracks``). Renderable entries
+    come first, in manifest order, so a blank id gets ``v{n}`` exactly as
+    `_canonical_voices` numbers it (the renderable voices seen so far, plus
+    one) — an id `/playback` serves is never re-used for a different track
+    here. Tracks that aren't renderable yet stay addressable and continue the
+    sequence after them. Duplicate ids raise `VoiceTargetError` (even when
+    one copy isn't renderable yet — an ambiguous id is a pack error, and
+    preparing the other copy would silently flip it into `/playback`'s view).
+    Non-mapping entries can't carry pointers or be addressed, so they are
+    skipped.
     """
     tracks = manifest.get("vocal_tracks")
     if not isinstance(tracks, list) or not tracks:
         return []
-    entries: list[tuple[str, dict]] = []
-    seen: set[str] = set()
+    usable: list[tuple[dict, str]] = []
+    unusable: list[tuple[dict, str]] = []
     for entry in tracks:
         if not isinstance(entry, dict):
             continue
         raw_id = _coerce_stringlike(entry.get("id"))
         voice_id = raw_id.strip() if raw_id is not None else ""
+        if _track_usable(source_dir, entry):
+            usable.append((entry, voice_id))
+        else:
+            unusable.append((entry, voice_id))
+
+    entries: list[tuple[str, dict, bool]] = []
+    seen: set[str] = set()
+    usable_seen = 0
+    for entry, voice_id in usable:
         if not voice_id:
-            # Number by addressable position, mirroring `_canonical_voices`, so
-            # a blank id gets the same fallback there and here.
-            n = len(entries) + 1
-            voice_id = f"v{n}"
-            while voice_id in seen:
-                n += 1
-                voice_id = f"v{n}"
+            voice_id = f"v{usable_seen + 1}"
         if voice_id in seen:
             raise VoiceTargetError(422, f"Duplicate vocal track id: {voice_id}")
         seen.add(voice_id)
-        entries.append((voice_id, entry))
+        usable_seen += 1
+        entries.append((voice_id, entry, True))
+
+    next_id = usable_seen + 1
+    for entry, voice_id in unusable:
+        if not voice_id:
+            voice_id = f"v{next_id}"
+            while voice_id in seen:
+                next_id += 1
+                voice_id = f"v{next_id}"
+            next_id += 1
+        if voice_id in seen:
+            raise VoiceTargetError(422, f"Duplicate vocal track id: {voice_id}")
+        seen.add(voice_id)
+        entries.append((voice_id, entry, False))
     return entries
 
 
@@ -936,10 +971,21 @@ def _voice_name(entry: dict) -> str | None:
     return raw_name.strip() if raw_name and raw_name.strip() else None
 
 
-def _voice_primary_id(entries: list[tuple[str, dict]]) -> str:
-    """The effective primary voice id: the first entry flagged ``primary``,
-    else the first addressable entry (mirrors `_canonical_voices`)."""
-    for voice_id, entry in entries:
+def _voice_primary_id(entries: list[tuple[str, dict, bool]]) -> str:
+    """The id `/playback` renders as primary: the first flagged *renderable*
+    entry, else the first renderable entry — mirroring `_canonical_voices`,
+    which only indexes tracks with usable tokens — so a default build targets
+    the same track the player shows as the lead. For a pack with nothing
+    renderable yet, falls back to the first flagged entry, then the first
+    addressable one, so a fresh duet still has a default target.
+    """
+    for voice_id, entry, usable in entries:
+        if usable and bool(entry.get("primary")):
+            return voice_id
+    for voice_id, _entry, usable in entries:
+        if usable:
+            return voice_id
+    for voice_id, entry, _usable in entries:
         if bool(entry.get("primary")):
             return voice_id
     return entries[0][0]
@@ -968,21 +1014,41 @@ def _voice_slug(voice_id: str) -> str:
     return slug or "voice"
 
 
+def _unique_voice_slug(voice_id: str, entries: list[tuple[str, dict, bool]]) -> str:
+    """A filesystem-safe slug for ``voice_id`` that no other voice shares.
+
+    Distinct ids can slug to the same text (``a/b`` and ``a_b`` both map to
+    ``a_b``), so the first occurrence keeps the bare slug and later ones get a
+    ``-2``/``-3`` suffix by addressable position. Position-based, so
+    re-preparing a voice deterministically writes the same file.
+    """
+    base = _voice_slug(voice_id)
+    n = 1
+    for vid, _entry, _usable in entries:
+        if vid == voice_id:
+            break
+        if _voice_slug(vid) == base:
+            n += 1
+    return base if n == 1 else f"{base}-{n}"
+
+
 def _default_voice_sidecars(
-    source_dir: Path, manifest: dict, voice_id: str, primary: bool
+    source_dir: Path, manifest: dict, voice_id: str, primary: bool,
+    entries: list[tuple[str, dict, bool]],
 ) -> tuple[str, str]:
     """Filenames for a voice with no declared sidecar pointer.
 
     The primary voice inherits the singular aliases (so a solo-era pack keeps
     reading its existing files) or the legacy default names. A secondary voice
-    gets an id-slugged name, so two voices can never be given the same file.
+    gets an id-slugged name, disambiguated against its siblings, so two voices
+    can never be given the same file.
     """
     if primary:
         return (
             _safe_voice_rel(source_dir, manifest.get("lyrics")) or _DEFAULT_LYRICS_REL,
             _safe_voice_rel(source_dir, manifest.get("vocal_pitch")) or _DEFAULT_PITCH_REL,
         )
-    slug = _voice_slug(voice_id)
+    slug = _unique_voice_slug(voice_id, entries)
     return f"{slug}.lyrics.json", f"{slug}.vocal_pitch.json"
 
 
@@ -992,24 +1058,28 @@ def _resolve_voice_target(
     """Resolve ``voice_id`` to a `VoiceTarget`, or the default voice when None.
 
     Raises `VoiceTargetError(422)` for an unknown id, and for a pack whose
-    ``vocal_tracks`` carry duplicate ids. The default is the effective primary
-    voice of a duet pack, or the solo voice, matching what `/playback` renders.
+    ``vocal_tracks`` carry duplicate ids. The default is the voice `/playback`
+    renders as primary — the first flagged renderable track, else the first
+    renderable one, else (for a pack with nothing prepared yet) the first
+    flagged or first addressable track — or the solo voice of a pack without
+    ``vocal_tracks``.
     """
     requested = _coerce_stringlike(voice_id)
     requested = requested.strip() if requested is not None else ""
 
-    entries = _voice_entries(manifest)
+    entries = _voice_entries(source_dir, manifest)
     if not entries:
         if requested and requested != "primary":
             raise VoiceTargetError(422, f"Unknown vocal track id: {voice_id}")
         return VoiceTarget(
             voice_id="primary", name="Vocals", primary=True, solo=True, entry=None,
-            lyrics_rel=_DEFAULT_LYRICS_REL, pitch_rel=_DEFAULT_PITCH_REL,
+            lyrics_rel=_safe_voice_rel(source_dir, manifest.get("lyrics")) or _DEFAULT_LYRICS_REL,
+            pitch_rel=_safe_voice_rel(source_dir, manifest.get("vocal_pitch")) or _DEFAULT_PITCH_REL,
         )
 
     primary_id = _voice_primary_id(entries)
     if requested:
-        for vid, entry in entries:
+        for vid, entry, _usable in entries:
             if vid == requested:
                 chosen_id, chosen = vid, entry
                 break
@@ -1017,14 +1087,14 @@ def _resolve_voice_target(
             raise VoiceTargetError(422, f"Unknown vocal track id: {voice_id}")
     else:
         chosen_id = primary_id
-        chosen = dict(entries)[chosen_id]
+        chosen = next(entry for vid, entry, _usable in entries if vid == chosen_id)
 
     primary = chosen_id == primary_id
     lyrics_rel = _safe_voice_rel(source_dir, chosen.get("lyrics"))
     pitch_rel = _safe_voice_rel(source_dir, chosen.get("vocal_pitch"))
     if lyrics_rel is None or pitch_rel is None:
         default_lyrics, default_pitch = _default_voice_sidecars(
-            source_dir, manifest, chosen_id, primary
+            source_dir, manifest, chosen_id, primary, entries
         )
         if lyrics_rel is None:
             lyrics_rel = default_lyrics
@@ -1059,20 +1129,20 @@ def _apply_voice_pointer(manifest: dict, target: VoiceTarget, key: str, rel: str
     return changed
 
 
-def _voice_summaries(manifest: dict) -> list[dict]:
+def _voice_summaries(source_dir: Path, manifest: dict) -> list[dict]:
     """``[{id, name, primary}]`` for the setup screen's voice selector.
 
     Includes every addressable voice, prepared or not, so the UI can offer a
     part whose sidecars don't exist yet. Raises `VoiceTargetError` on duplicate
     ids, like `/playback` does.
     """
-    entries = _voice_entries(manifest)
+    entries = _voice_entries(source_dir, manifest)
     if not entries:
         return [{"id": "primary", "name": "Vocals", "primary": True}]
     primary_id = _voice_primary_id(entries)
     return [
         {"id": voice_id, "name": _voice_name(entry), "primary": voice_id == primary_id}
-        for voice_id, entry in entries
+        for voice_id, entry, _usable in entries
     ]
 
 
@@ -1311,7 +1381,7 @@ def setup(app: FastAPI, context: dict):
         try:
             target = _resolve_voice_target(source_dir, manifest, voice or None)
             result["voice"] = target.id
-            result["voices"] = _voice_summaries(manifest)
+            result["voices"] = _voice_summaries(source_dir, manifest)
         except VoiceTargetError as exc:
             return JSONResponse({"error": exc.message}, exc.status)
         vocals_rel = _vocals_rel_path(manifest)

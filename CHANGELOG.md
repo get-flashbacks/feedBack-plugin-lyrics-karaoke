@@ -28,7 +28,8 @@ and the repository's tagged history.
   a secondary voice never overwrites another track's sidecars. The setup
   wizard gains a **Vocal part** picker that appears only for a duet and pins
   the whole build (align → save → extract) to the chosen part. A solo pack is
-  unchanged: no `voice` still resolves to the legacy hardcoded names.
+  unchanged: no `voice` still resolves to the singular `lyrics`/`vocal_pitch`
+  aliases.
   `tests/test_voice_preparation.py` covers primary/secondary writes, alias
   sync, `/playback` agreement, unknown/duplicate ids, per-voice `/status`
   flags, and the solo default.

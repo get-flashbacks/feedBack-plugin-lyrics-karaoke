@@ -97,17 +97,30 @@ The preparation routes (`POST /align`, `POST /save-lyrics`,
 `vocal_tracks` entry `id` — and all four resolve it through the same helper so
 they agree on which track the wizard is working on.
 
-- **Default.** No `voice` (or an empty string) resolves to the effective
-  primary: the first entry flagged `primary`, else the first addressable entry.
-  For a solo pack, and for a `vocal_tracks` list with no primary flag, this is
-  the synthetic `primary` voice that owns the legacy singular sidecars.
+- **Default.** No `voice` (or an empty string) resolves to the voice `/playback`
+  renders as primary: the first flagged *renderable* track, else the first
+  renderable one — matching `_canonical_voices`, which only indexes tracks with
+  usable tokens. For a pack with nothing renderable yet (a fresh duet awaiting
+  preparation) it falls back to the first flagged track, else the first
+  addressable one. A solo pack resolves to the synthetic `primary` voice that
+  owns the legacy singular sidecars.
+- **Blank-id numbering matches `/playback`.** A `vocal_tracks` entry with no
+  usable `id` gets the same `v{n}` fallback `_canonical_voices` assigns (the
+  renderable voices seen so far, plus one). Tracks that aren't renderable yet
+  stay addressable and continue the sequence after them, so a fallback id
+  never collides with an id `/playback` already uses for a different track.
+  Duplicate ids are rejected even when one copy isn't renderable yet — an
+  ambiguous id is a pack error, and preparing the other copy silently flips it
+  into `/playback`'s view.
 - **Writes target the track's own files.** The sidecar a save or pitch job
   writes is the resolved entry's own `lyrics`/`vocal_pitch` pointer, never a
   shared hardcoded name — so a secondary voice cannot clobber the primary's
   files. When the pointer is absent, unsafe, or would escape the pack, the
   track falls back to a per-voice default: the primary inherits the singular
-  alias (or `lyrics.json`/`vocal_pitch.json`), a secondary uses
-  `<id>.lyrics.json`/`<id>.vocal_pitch.json`.
+  alias (or `lyrics.json`/`vocal_pitch.json`), a secondary uses an
+  id-slugged `<id>.lyrics.json`/`<id>.vocal_pitch.json`. Slugs are
+  disambiguated against sibling voices (a `/` and a `_` in different ids can
+  slug to the same text), so two voices never share a default file.
 - **The primary keeps the aliases in sync.** After a primary write the singular
   `lyrics`/`vocal_pitch` keys are re-pointed at the primary's files, preserving
   the additive-extension guarantee that older readers see the primary through

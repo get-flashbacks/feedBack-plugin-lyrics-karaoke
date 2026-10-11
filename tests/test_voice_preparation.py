@@ -102,6 +102,17 @@ def _write_solo_pack(pack_dir: Path) -> None:
     )
 
 
+def _write_scaffold(pack_dir: Path, manifest: dict, files: dict) -> None:
+    """Directory-form pack from a manifest dict plus ``{name: json_payload}``."""
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    for name, payload in files.items():
+        _write_json(pack_dir / name, payload)
+    (pack_dir / "vocals.wav").write_bytes(b"RIFF" + b"\x00" * 40)
+    (pack_dir / "manifest.yaml").write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8",
+    )
+
+
 # ── /save-lyrics ─────────────────────────────────────────────────────────────
 
 
@@ -372,3 +383,150 @@ def test_resolve_voice_target_ignores_unsafe_pointer(tmp_path):
     target = routes._resolve_voice_target(tmp_path, manifest, "harmony")
     assert target.lyrics_rel == "harmony.lyrics.json"
     assert target.pitch_rel == "harmony.vocal_pitch.json"
+
+
+# ── Review-driven coverage: blank-id parity, slug collisions, solo aliases ───
+
+
+def test_status_blank_id_default_mirrors_playback_when_first_track_unprepared(tmp_path):
+    # The first track has no lyrics yet, so /playback can only serve the
+    # second — which gets the fallback id v1. /status must number it the same
+    # way and default to that renderable track, not the unprepared first entry.
+    library = tmp_path / "library"
+    library.mkdir()
+    pack = library / "duet.sloppak"
+    _write_scaffold(pack, {
+        "feedpak_version": "1.0.0", "title": "Duet", "artist": "CI",
+        "stems": [{"id": "vocals", "file": "vocals.wav", "default": True}],
+        "lyrics": "lead.json", "vocal_pitch": "lead_pitch.json",
+        "vocal_tracks": [
+            {"id": "", "name": "New", "lyrics": "missing.json"},
+            {"id": "", "name": "Lead", "lyrics": "lead.json",
+             "vocal_pitch": "lead_pitch.json"},
+        ],
+    }, {
+        "lead.json": LEAD_LYRICS,
+        "lead_pitch.json": LEAD_PITCH,
+    })
+    client = _client(tmp_path, library, "test.voice.blank.primary")
+
+    status = client.get(f"{BASE}/status", params={"filename": "duet.sloppak"})
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["voice"] == "v1"
+    assert [v["id"] for v in body["voices"]] == ["v1", "v2"]
+    assert body["has_lyrics"] is True and body["has_pitch"] is True
+
+
+def test_status_blank_unprepared_track_does_not_collide_with_explicit_id(tmp_path):
+    # Regression: the old fallback numbered the unprepared blank-id track v1,
+    # clashing with the second track's explicit v1 and 422ing every prep route
+    # even though /playback serves the pack fine.
+    library = tmp_path / "library"
+    library.mkdir()
+    pack = library / "duet.sloppak"
+    _write_scaffold(pack, {
+        "feedpak_version": "1.0.0", "title": "Duet", "artist": "CI",
+        "stems": [{"id": "vocals", "file": "vocals.wav", "default": True}],
+        "lyrics": "lead.json", "vocal_pitch": "lead_pitch.json",
+        "vocal_tracks": [
+            {"id": "", "name": "New", "lyrics": "missing.json"},
+            {"id": "v1", "name": "Lead", "lyrics": "lead.json",
+             "vocal_pitch": "lead_pitch.json"},
+        ],
+    }, {
+        "lead.json": LEAD_LYRICS,
+        "lead_pitch.json": LEAD_PITCH,
+    })
+    client = _client(tmp_path, library, "test.voice.blank.v1")
+
+    status = client.get(f"{BASE}/status", params={"filename": "duet.sloppak"})
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["voice"] == "v1"
+    assert [v["id"] for v in body["voices"]] == ["v1", "v2"]
+
+
+def test_resolve_voice_target_uniquifies_colliding_default_sidecars(tmp_path):
+    # Distinct ids that slug to the same text (a/b and a_b) must not share a
+    # default sidecar, or preparing one secondary would overwrite the other.
+    manifest = {
+        "vocal_tracks": [
+            {"id": "lead", "primary": True,
+             "lyrics": "lead.json", "vocal_pitch": "lead_pitch.json"},
+            {"id": "a/b"},
+            {"id": "a_b"},
+        ],
+    }
+    first = routes._resolve_voice_target(tmp_path, manifest, "a/b")
+    second = routes._resolve_voice_target(tmp_path, manifest, "a_b")
+    assert first.lyrics_rel != second.lyrics_rel
+    assert first.lyrics_rel == "a_b.lyrics.json"
+    assert first.pitch_rel == "a_b.vocal_pitch.json"
+    assert second.lyrics_rel == "a_b-2.lyrics.json"
+    assert second.pitch_rel == "a_b-2.vocal_pitch.json"
+
+
+def test_solo_pack_status_and_save_honor_custom_manifest_alias(tmp_path):
+    # A solo pack whose legacy singular pointers name custom files: /status
+    # and /save-lyrics must use the declared pointer (the pre-PR read path
+    # honored the alias), not the hardcoded lyrics.json.
+    library = tmp_path / "library"
+    library.mkdir()
+    pack = library / "solo.sloppak"
+    _write_scaffold(pack, {
+        "feedpak_version": "1.0.0", "title": "Solo", "artist": "CI",
+        "stems": [{"id": "vocals", "file": "vocals.wav", "default": True}],
+        "lyrics": "custom.json", "vocal_pitch": "custom_pitch.json",
+    }, {
+        "custom.json": LEAD_LYRICS,
+        "custom_pitch.json": LEAD_PITCH,
+    })
+    client = _client(tmp_path, library, "test.voice.solo.alias")
+
+    status = client.get(f"{BASE}/status", params={"filename": "solo.sloppak"}).json()
+    assert status["voice"] == "primary"
+    assert status["has_lyrics"] is True
+    assert status["has_pitch"] is True
+    assert status["pitch_count"] == 2
+
+    resp = client.post(
+        f"{BASE}/save-lyrics",
+        json={"filename": "solo.sloppak", "segments": NEW_SEGMENTS},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["voice"] == "primary"
+    assert _read_json(pack / "custom.json") == [{"t": 0.0, "d": 0.5, "w": "new"}]
+    assert not (pack / "lyrics.json").exists()
+    assert _read_manifest(pack)["lyrics"] == "custom.json"
+
+
+def test_generate_pitch_solo_honors_custom_manifest_alias(tmp_path, monkeypatch):
+    # The pitch gate reads the resolved target's lyrics; for a solo pack that
+    # must be the declared alias, or this regresses to "No synced lyrics".
+    library = tmp_path / "library"
+    library.mkdir()
+    pack = library / "solo.sloppak"
+    _write_scaffold(pack, {
+        "feedpak_version": "1.0.0", "title": "Solo", "artist": "CI",
+        "stems": [{"id": "vocals", "file": "vocals.wav", "default": True}],
+        "lyrics": "custom.json", "vocal_pitch": "custom_pitch.json",
+    }, {
+        "custom.json": LEAD_LYRICS,
+    })
+    monkeypatch.setattr(
+        routes, "_extract_pitch_per_syllable",
+        lambda vocab_path, lyrics: [{"t": 0.5, "d": 0.4, "midi": 60}],
+    )
+    client = _client(tmp_path, library, "test.voice.solo.alias.pitch")
+
+    resp = client.post(
+        f"{BASE}/generate-pitch",
+        json={"filename": "solo.sloppak"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["voice"] == "primary"
+    assert _read_json(pack / "custom_pitch.json")["notes"] == [
+        {"t": 0.5, "d": 0.4, "midi": 60},
+    ]
+    assert not (pack / "vocal_pitch.json").exists()
