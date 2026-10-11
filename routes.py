@@ -153,6 +153,58 @@ def _vocals_rel_path(manifest: dict) -> str | None:
     return None
 
 
+# ── Numeric coercion ──────────────────────────────────────────────────────────
+#
+# Sidecar JSON and a demucs server's /pitch response are both untrusted input.
+# Python's json decoder accepts the bare literals NaN/Infinity/-Infinity and
+# turns a JSON exponent overflow like 1e309 into a non-finite float, so
+# ``float()`` succeeds but ``int()`` then raises OverflowError on the
+# infinity. A huge integer literal decodes to an arbitrary-precision ``int``
+# whose ``float()`` raises OverflowError outright. Both used to escape the
+# readers' TypeError/ValueError guards and take down /playback or /data.
+
+# MIDI 1.0 note numbers run 0–127; anything outside is a malformed record,
+# not a pitch to draw.
+MIDI_MIN = 0
+MIDI_MAX = 127
+
+
+def _coerce_finite_number(value: object) -> float | None:
+    """Return ``float(value)`` when it's a finite JSON number, else ``None``.
+
+    ``bool`` is rejected because it is an ``int`` subclass and would
+    otherwise coerce to ``0.0``/``1.0``; strings are rejected rather than
+    parsed so a stray ``"1.5"`` counts as an invalid type, matching
+    ``_coerce_stringlike``'s treatment of ids.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        result = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _coerce_midi(value: object) -> int | None:
+    """Return an integer MIDI note in ``[0, 127]``, or ``None`` when the
+    record is malformed — non-numeric, non-finite, overflowing, or out of
+    range. Follows the per-token drop policy: a bad pitch note is skipped
+    and its lyric token stays unpitched rather than failing the request.
+
+    The range is tested on the pre-conversion number, so a negative or
+    above-127 fraction (``-0.5``, ``127.9``) is rejected rather than
+    truncated into range; an in-range fraction (``60.9``) truncates toward
+    zero, as the old ``int()`` call did.
+    """
+    number = _coerce_finite_number(value)
+    if number is None:
+        return None
+    if not MIDI_MIN <= number <= MIDI_MAX:
+        return None
+    return int(number)
+
+
 def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     """Return the sloppak's syllable list as ``[{t, d, w}, ...]``.
 
@@ -176,16 +228,11 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     for item in data:
         if not isinstance(item, dict):
             continue
-        try:
-            t = float(item.get("t", 0.0))
-            d = float(item.get("d", 0.0))
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(t) or not math.isfinite(d):
+        t = _coerce_finite_number(item.get("t", 0.0))
+        d = _coerce_finite_number(item.get("d", 0.0))
+        if t is None or d is None or d <= 0:
             continue
         w = str(item.get("w", ""))
-        if d <= 0:
-            continue
         out.append({"t": t, "d": d, "w": w})
     return out
 
@@ -267,12 +314,9 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     for note in pitch_notes:
         if not isinstance(note, dict):
             continue
-        try:
-            t = float(note["t"])
-            midi = int(note["midi"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not math.isfinite(t):
+        t = _coerce_finite_number(note.get("t"))
+        midi = _coerce_midi(note.get("midi"))
+        if t is None or midi is None:
             continue
         pitch_by_t[repr(t)] = midi
 
@@ -280,12 +324,9 @@ def _canonical_voice_tokens(source_dir: Path, manifest: dict) -> list[dict]:
     for item in raw_lyrics or []:
         if not isinstance(item, dict):
             continue
-        try:
-            start = float(item.get("t", 0.0))
-            duration = float(item.get("d", 0.0))
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(start) or not math.isfinite(duration) or duration < 0:
+        start = _coerce_finite_number(item.get("t", 0.0))
+        duration = _coerce_finite_number(item.get("d", 0.0))
+        if start is None or duration is None or duration < 0:
             continue
         token = {"start": start, "duration": duration, "text": str(item.get("w", ""))}
         midi = pitch_by_t.get(repr(start))
@@ -777,19 +818,19 @@ def _extract_pitch_via_server(server_url: str, vocals_path: Path, lyrics: list[d
     notes = body.get("notes") if isinstance(body, dict) else None
     if not isinstance(notes, list):
         raise RuntimeError("server /pitch response missing 'notes' list")
-    # Coerce to the local shape: int midi, float t/d.
+    # Coerce to the local shape: int midi, float t/d. Remote output is
+    # untrusted — a malformed record is dropped here, before it can reach
+    # _persist_pitch, rather than being written into vocal_pitch.json.
     out: list[dict] = []
     for n in notes:
         if not isinstance(n, dict):
             continue
-        try:
-            out.append({
-                "t": float(n["t"]),
-                "d": float(n["d"]),
-                "midi": int(n["midi"]),
-            })
-        except (KeyError, TypeError, ValueError):
+        t = _coerce_finite_number(n.get("t"))
+        d = _coerce_finite_number(n.get("d"))
+        midi = _coerce_midi(n.get("midi"))
+        if t is None or d is None or d < 0 or midi is None:
             continue
+        out.append({"t": t, "d": d, "midi": midi})
     return out
 
 
@@ -1056,8 +1097,13 @@ def setup(app: FastAPI, context: dict):
 
         pitch_by_t: dict[str, int] = {}
         for n in notes:
-            if isinstance(n, dict) and "t" in n and "midi" in n:
-                pitch_by_t[repr(float(n["t"]))] = int(n["midi"])
+            if not isinstance(n, dict):
+                continue
+            t = _coerce_finite_number(n.get("t"))
+            midi = _coerce_midi(n.get("midi"))
+            if t is None or midi is None:
+                continue
+            pitch_by_t[repr(t)] = midi
 
         merged = []
         for tok in _lyrics_tokens(source_dir, manifest):

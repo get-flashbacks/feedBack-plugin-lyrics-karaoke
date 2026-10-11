@@ -12,6 +12,23 @@ and the repository's tagged history.
 
 ### Fixed
 
+- A pitch sidecar whose numbers overflow or are malformed can no longer crash
+  playback ([#62](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/62)).
+  Python's JSON decoder accepts the `NaN`/`Infinity` literals and turns `1e309`
+  into infinity, so a valid-JSON `vocal_pitch.json` reached
+  `int(float('inf'))` — an `OverflowError`, which the readers caught only as
+  `KeyError`/`TypeError`/`ValueError`, so `GET /playback` returned an uncaught
+  server error instead of the documented boundary response. Pitch timestamps,
+  durations, and MIDI values now pass through explicit finite/type/range
+  validation before conversion: a non-numeric, non-finite, overflowing, or
+  out-of-range record is dropped per the boundary policy, leaving its token
+  unpitched. MIDI is range-checked to `0–127` before conversion. The same
+  coercion guards the legacy `/data` merge — which also stopped 500ing on a
+  `midi: null` record — and the demucs server's
+  `/pitch` output, now validated before it is persisted.
+  `tests/test_pitch_validation.py` covers JSON exponent overflow,
+  `NaN`/`Infinity`, strings, null, negative duration, and out-of-range MIDI
+  across `/playback`, `/data`, and the remote extractor.
 - A malformed alignment result can no longer erase existing lyrics
   ([#59](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/59)).
   `POST /save-lyrics` sanitizes incoming segments one at a time, so a result
