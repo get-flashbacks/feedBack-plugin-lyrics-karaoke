@@ -50,7 +50,7 @@ def test_persist_lyrics_skips_non_finite_segments(tmp_path):
         {"start": 2.0, "end": 3.5, "text": "ok"},
     ]
 
-    count = routes._persist_lyrics(
+    count, dropped = routes._persist_lyrics(
         tmp_path,
         {"lyrics": "lyrics.json"},
         segments,
@@ -59,6 +59,7 @@ def test_persist_lyrics_skips_non_finite_segments(tmp_path):
     )
 
     assert count == 1
+    assert dropped == 2
     assert json.loads((tmp_path / "lyrics.json").read_text(encoding="utf-8")) == [
         {"t": 2.0, "d": 1.5, "w": "ok"}
     ]

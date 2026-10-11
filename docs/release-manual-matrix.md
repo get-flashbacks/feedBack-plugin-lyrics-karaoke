@@ -354,12 +354,16 @@ behind the releases filter).
 Two facts from this run mean the operator is confirming the procedure rather
 than discovering the outcome:
 
-- Since `v1.12.0`, `routes.py` has changed by exactly one thing: PR [#39]
-  added the tolerant `_resolve_dlc_path` fallback for hosts that lack
-  `lib/dlc_paths.py`. `_persist_lyrics`, `_persist_pitch`, `_write_manifest`
-  and `_rezip_sloppak` are byte-identical to the released code, so both
-  sides of the swap write and read the same pack format and neither has to
-  translate anything.
+- Since `v1.12.0`, `routes.py` has changed in two ways: PR [#39] added the
+  tolerant `_resolve_dlc_path` fallback for hosts that lack
+  `lib/dlc_paths.py`, and [#59] added a pre-write validation guard to
+  `_persist_lyrics` so a result with no usable segment is rejected before any
+  sidecar, manifest, or archive write. The guard changes only *when* a save is
+  refused, not the on-disk format: `_persist_pitch`, `_write_manifest` and
+  `_rezip_sloppak` are byte-identical to the released code, and
+  `_persist_lyrics` writes the same `lyrics.json` shape it did, so both sides
+  of the swap write and read the same pack format and neither has to translate
+  anything.
 - Every write those helpers make targets the pack itself — `lyrics.json`
   and `vocal_pitch.json` go into the pack's source directory and the
   manifest is patched in place, under the DLC directory for a
@@ -405,3 +409,4 @@ private song titles, and microphone device names before sharing.
 [#45]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/45
 [#46]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/46
 [#47]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47
+[#59]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/59

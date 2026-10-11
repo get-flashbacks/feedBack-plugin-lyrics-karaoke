@@ -131,8 +131,9 @@ def test_persist_lyrics_writes_file_and_updates_manifest(tmp_path):
         {"start": 2.0, "text": "no end"},            # missing key, dropped
         {"start": 3.0, "end": 3.5},                  # no text -> ""
     ]
-    count = routes._persist_lyrics(tmp_path, manifest, segments, tmp_path / "song.sloppak", is_zip=False)
+    count, dropped = routes._persist_lyrics(tmp_path, manifest, segments, tmp_path / "song.sloppak", is_zip=False)
     assert count == 2
+    assert dropped == 2
 
     lyrics = json.loads((tmp_path / "lyrics.json").read_text(encoding="utf-8"))
     assert lyrics == [

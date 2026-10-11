@@ -238,6 +238,7 @@ the same song packs when rolling back.
 | Microphone says busy or unavailable | Another application or panel holds the device. Release it, then click 🎤 again. |
 | The 🎤 control is disabled | An older Note Detect (< 1.15.2) is installed; update Note Detect and click 🎤 again. |
 | Voice appears late or early | There is no calibration control in 1.13.0: edit the mic timing offset in `lyrics_karaoke.prefs.v1` (see [Settings](#settings-with-no-control-today)) and reopen the panel. |
+| Build Karaoke rejects the save | The alignment result had no usable segments (missing or invalid start/end times). Existing lyrics are left untouched, so re-run alignment. A partial result still saves its usable segments and the response reports how many were dropped. |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; malformed packs are reported separately from missing ones. |
 | Session score looks stale | Play/pause/seek/song-switch are all pinned; if anything survives a transport change, report it. |
 
