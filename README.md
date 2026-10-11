@@ -29,19 +29,25 @@ a community-maintained fork, not an official got-feedBack release.
 
 Install this plugin in FeedBack's plugin directory and enable it in the host.
 The highway renderer requires FeedBack **0.3.0-alpha.1 or later**. Older
-hosts, and hosts on 1.13.0 with no consumer for the factory, use the legacy
-karaoke overlay.
+hosts use the legacy karaoke overlay. On newer hosts the **Karaoke** button
+still drives that overlay ribbon, and the highway renderer is reached
+through the **Fullscreen** button — see
+[Fullscreen karaoke](#fullscreen-karaoke).
 
-As of 2026-10-02 this edition is mid-migration. Since 1.13.0
-([#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44))
-it no longer appears in FeedBack's visualization picker, in Auto mode, or in
-splitscreen's per-panel dropdown, and the **Karaoke** button still drives the
-legacy pitch ribbon rather than the highway renderer. The renderer itself is
-unchanged and still builds from the plugin factory, so a splitscreen panel
-that already had Lyrics Karaoke saved as its visualization keeps loading it.
-The rest of
-[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
-wires it behind the Karaoke button.
+Since 1.13.0 the renderer no longer appears in FeedBack's visualization
+picker, in Auto mode, or in splitscreen's per-panel dropdown
+([#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44)).
+It is reached today by its own dedicated **Fullscreen** control
+([#46](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/46)
+and [#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47)),
+in the main player next to the shared 🎤 control — not by the **Karaoke**
+button, which still drives the legacy pitch ribbon. A splitscreen panel that
+already had Lyrics Karaoke saved as its visualization keeps loading the
+renderer too. The renderer's scoring settings still have no in-app control;
+see the settings paragraph under [Play and score](#play-and-score) for what
+is missing, and
+[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63)
+for the control surface that would expose them.
 
 ### Core compatibility
 
@@ -121,11 +127,44 @@ pitch ribbon with its 🎤 control. The ribbon draws pitch bars, timed syllables
 and — with the microphone on — an accuracy tint on what you have sung. In a
 duet pack it also marks the other parts with thin guide bars on the same
 chart, and a bouncing cue under the syllable you are on becomes a get-ready
-countdown across a silent lead-in. The highway renderer draws pitch lanes,
-note slabs, timed syllables, and guide bars for the other part — but since
-1.13.0 no host control selects it; see
-[migration status](#why-choose-the-get-flashbacks-edition). A splitscreen panel
-that already had Lyrics Karaoke selected as its visualization still loads it.
+countdown across a silent lead-in.
+
+The **Fullscreen** button, beside the 🎤 control, is the dedicated control
+for the highway renderer: it replaces the current highway visualization with
+the karaoke stage — note slabs, pitch lanes, timed syllables, duet guide
+bars, and an end-of-song summary card — without leaving the player. It is
+available for any sloppak song, pitch data or not, and exiting it restores
+the visualization that was active before it started
+([#46](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/46),
+[#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47));
+see [Fullscreen](#fullscreen-karaoke). A splitscreen panel that already had
+Lyrics Karaoke selected as its visualization still loads the same renderer.
+
+## Fullscreen karaoke
+
+The **Fullscreen** button appears in the main player's control row once a
+sloppak song is loaded and the host reports the main highway visible
+(so it is a main-player control, not a splitscreen one). Clicking it
+installs the highway renderer directly on the player's highway; clicking
+**Fullscreen ✓** again leaves it. It needs only a host with
+`highway.setRenderer` — the `minHost` floor — and works with or without
+pitch data: a lyrics-only song draws the same stage as a flat lyric ribbon.
+
+Entering fullscreen records the visualization that was active (the id the
+host's picker persists, read from `localStorage.vizSelection`, falling back
+to the picker itself when storage is blocked). Exiting re-installs that id
+through the host's own picker path, so 3D Highway, Piano, or whatever was
+shown before comes back rather than the default 2D highway. If nothing was
+persisted, or the remembered id no longer resolves (its plugin was
+unloaded), exit falls back to the default highway without an error. Leaving
+the player screen, or switching songs, exits fullscreen first.
+
+While fullscreen is up, the karaoke renderer owns playback and microphone
+scoring exactly as a splitscreen panel would: the legacy ribbon stands down,
+Note Detect's singleton is suppressed while it would compete, and the
+shared 🎤 control's device and channel pickers are available. If another
+vocals panel is already live, the button stays enabled and its tooltip
+explains that the visualization provider owns playback in another panel.
 
 Microphone access starts only when you click the shared **🎤** control.
 Permission can be denied without stopping lyric playback. The device and
@@ -150,9 +189,9 @@ Tolerance, octave-free matching and mic offset are one shared document in
 Highway's `vocals_highway.*` keys when it does not exist yet, so a
 calibration done there still applies; a fresh install with neither has no
 in-app way to change them, and microphone feedback, sung part and left rail
-have no reachable setter at all. Re-homing them into the karaoke UI is the
-next part of
-[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
+have no reachable setter at all. Exposing them in the karaoke UI is tracked
+in
+[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 
 ## Fallback, migration, and rollback
 
@@ -168,12 +207,12 @@ back to a compatible Lyrics Karaoke release.
 
 | Symptom | Check |
 | --- | --- |
-| No highway | Lyrics Karaoke is not in the visualization picker, Auto, or splitscreen's dropdown since 1.13.0. The **Karaoke** button gives you the pitch ribbon; the highway returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
+| No highway | Lyrics Karaoke is not in the visualization picker, Auto, or splitscreen's dropdown since 1.13.0. The **Karaoke** button gives you the pitch ribbon; the **Fullscreen** button opens the highway renderer. |
 | Song does not resolve on an old host | A song pack that is a symlink pointing outside the library is refused by the pre-`0dcc913` fallback; update the host. |
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
 | Wrong input or channel | Use the shared device and Mix / Ch 1 / Ch 2 selectors; reconnect a missing device and start capture again. |
-| Voice appears late or early | Scoring runs on the engine's mic offset. There is no control for it in 1.13.0 — edit the value in `lyrics_karaoke.prefs.v1` (see the user guide's [Settings](docs/user-guide.md#settings-with-no-control-today) section); a control returns with the rest of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32). |
+| Voice appears late or early | Scoring runs on the engine's mic offset. There is no control for it in 1.13.0 — edit the value in `lyrics_karaoke.prefs.v1` (see the user guide's [Settings](docs/user-guide.md#settings-with-no-control-today) section); a control is tracked in [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63). |
 | Build Karaoke rejects the save | The alignment result had no usable segments (missing or invalid start/end times). Existing lyrics are left untouched, so re-run alignment. A partial result still saves its usable segments and the response reports how many were dropped. |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; the renderer reports malformed packs separately from missing ones. |
 

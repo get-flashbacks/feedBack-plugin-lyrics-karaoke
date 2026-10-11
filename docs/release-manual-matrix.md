@@ -90,20 +90,24 @@ Work through the Results table row by row. For each row:
 4. Capture the evidence listed in the third column (screenshot, console
    log, browser permission indicator, sidecar mtime, etc.).
 5. Record the evidence file path or URL in the "Evidence / issue" column.
-6. If a row is **Blocked**, name the blocking issue (e.g. `#32`, `#46`,
-   `#47`) — never leave a cell blank.
+6. If a row is **Blocked**, name the blocking issue (e.g. `#63`) or the
+   missing route — never leave a cell blank.
 
 Entry-point rules (see Which entry point reaches what):
 
 - The **Karaoke** button's 🎤 overlay reaches `No mic`, `Denied mic`,
   `Default mic`, and `Disconnect`. You do not need the visualization picker.
-- `Saved panel pref` and `Registry-fetch fallback` require a splitscreen
-  panel saved before PR [#44].
-- `Interface`, `Duet` (stage half), `Single panel` (stage half), `Mixed
-  split`, `Two vocals panels`, and `Layout` need a route that installs the
-  renderer. If you cannot reach one through the normal picker, mark it
-  **Blocked → [#32]/[#46]/[#47]** and record which route you used in the
-  Evidence column.
+- The **Fullscreen** button in the main player, shipped in
+  [#46]/[#47], is the user-facing route to the renderer: it installs the
+  factory over the current highway, and **Fullscreen ✓** exits and restores
+  the previous visualization. Use it for `Interface`, the `Duet` stage half,
+  and the `Single panel` stage half — no picker needed.
+- `Mixed split`, `Two vocals panels`, and `Layout` need a renderer inside a
+  splitscreen panel, which the button does not reach (it is hidden when the
+  main highway is not visible). Enter them through `Saved panel pref` or
+  `Registry-fetch fallback` — both require a splitscreen panel saved before
+  PR [#44]. If neither is available, mark the row **Blocked** and note that
+  1.13.0 ships no in-app splitscreen selection for this renderer by design.
 
 **Screenshots to capture now** (these are reused for the latest-host run):
 
@@ -111,6 +115,8 @@ Entry-point rules (see Which entry point reaches what):
 - Migration: pre-release pack with unchanged mtimes
 - Selection: each visualization list (core picker, Auto, splitscreen
   dropdown) showing no Lyrics Karaoke entry, plus the Karaoke ribbon running
+- Fullscreen: the stage running after clicking **Fullscreen**, and the view
+  restored after **Fullscreen ✓**
 - Default mic: trace and score while singing, plus the stopped state after
   the second click
 - Disconnect: the `!` pill and the full 🎤 tooltip text
@@ -190,9 +196,19 @@ Since [#44] dropped `type: "visualization"`, every list the host builds
 from `/api/plugins` — core's visualization picker, core's Auto mode, and
 splitscreen's per-panel visualization dropdown — filters this plugin out, so
 none of them can offer it any more. Nothing was removed from the renderer
-itself. Three routes still install it, and one more — the Karaoke button's
-overlay — covers the four mic rows that never needed it:
+itself. Four routes still install it, the **Fullscreen** button being the one
+users get, and the Karaoke button's overlay covers the four mic rows that
+never needed it:
 
+- **Fullscreen button (the user-facing route, [#46]).** Shipped in the main
+  player's control row beside the shared 🎤, it installs the factory through
+  `highway.setRenderer()` on any sloppak song. **Fullscreen ✓** exits and
+  re-installs the visualization that was active beforehand by its persisted
+  id (`localStorage.vizSelection`, falling back to the `#viz-picker` value),
+  or the default highway when that id no longer resolves ([#47]). It is
+  hidden in splitscreen panels and whenever the main highway is not visible,
+  so it reaches the main-player rows only: `Interface`, the `Duet` stage
+  half, and the `Single panel` stage half.
 - **Karaoke button overlay (no renderer).** `No mic`, `Denied mic`,
   `Default mic` and `Disconnect` are reachable today through the **Karaoke**
   button's own 🎤. The overlay mirrors the shared microphone controller's
@@ -220,26 +236,29 @@ overlay — covers the four mic rows that never needed it:
   then drops as a stale value, so put the user's saved visualization choice
   back afterwards.
 
-Every renderer-dependent row (`Interface`, the stage halves of `Duet` and
-`Single panel`, `Mixed split`, `Two vocals panels`, `Layout`) can therefore
-be exercised before [#46] and [#47] re-home the renderer behind the Karaoke
-button. Record which route the run used in the Evidence column. If you would
-rather test only the entry points a user gets in the release itself, mark
-those rows Blocked with [#32]/[#46]/[#47] instead — but never leave a cell
-blank, and never record a fallback-routed run as if the normal picker had
-offered it.
+Every renderer-dependent row is reachable in 1.13.0. The main-player rows
+(`Interface`, the stage halves of `Duet` and `Single panel`) run through the
+**Fullscreen** button — the normal user route. The splitscreen rows
+(`Mixed split`, `Two vocals panels`, `Layout`) still need a renderer
+installed inside a panel, which the button does not reach, so enter them
+through `Saved panel pref` or `Registry-fetch fallback` and record which
+route you used in the Evidence column. Never record a fallback-routed run as
+if the normal picker had offered it. If no splitscreen route is available,
+mark the row Blocked — 1.13.0 ships no in-app splitscreen selection for this
+renderer by design.
 
 Two clarifications before you start:
 
 - The **Karaoke** button's ribbon is reachable today and, since [#45],
   draws duet guide bars, the get-ready cue and the accuracy tint itself. The
   observation half of `Duet` and `Single panel` can therefore be recorded
-  against the ribbon now; only the rows that need the stage renderer follow
-  the entry-point rules above.
+  against the ribbon now; their stage half runs from the **Fullscreen**
+  button.
 - The ribbon and the renderer both have **no sung-part control** as of
   1.13.0 (the manifest declares no settings, so nothing renders or calls
-  them). The scored voice is always the primary one — record `Duet` on that
-  basis rather than trying to switch parts.
+  them; [#63] tracks the control surface). The scored voice is always the
+  primary one — record `Duet` on that basis rather than trying to switch
+  parts.
 
 ## Results
 
@@ -258,31 +277,35 @@ cannot run as written.
 | No mic | Load and play without clicking 🎤; browser requests no microphone. | | | Permission indicator or console showing no request. |
 | Denied mic | Deny permission; lyrics continue, one actionable error appears, no retry loop. | | | Screenshot of the single error; console showing one request and no retries. |
 | Default mic | Click 🎤 and sing; trace and score update; stop releases the track. | | | Trace and score screenshot, plus the stopped state after the second click. |
-| Interface | Select multichannel device and Mix / Ch 1 / Ch 2; input follows selection. | | | Renderer route used; otherwise Blocked → [#32]/[#46]/[#47]. |
+| Interface | Select multichannel device and Mix / Ch 1 / Ch 2; input follows selection. | | | Renderer route used (**Fullscreen** button or a splitscreen panel); record which. |
 | Disconnect | Unplug active device; capture stops, error appears, and reconnect requires a click. | | | Overlay error screenshot (`!` pill; full text in the 🎤 tooltip); no renderer needed (see entry points). |
 | Transport | Play, pause, seek forward/back, restart, switch songs, and reach end; no stale score or timer remains. | | | End-of-song score screenshot and a note that nothing kept ticking after the switch or the end. |
-| Duet | Confirm the other parts draw as guide bars on the scored voice's pitch axis. Part switching has no control in 1.13.0, so record the primary voice only (see the note above). | | | Guide bars on the ribbon today; stage half needs a route, else Blocked → [#32]/[#46]/[#47]. |
-| Single panel | Solo, incomplete-pitch, and lyrics-only packs draw appropriately. | | | One screenshot per pack; stage half needs a route, else Blocked → [#32]/[#46]/[#47]. |
-| Mixed split | Vocals plus instrument panel; one vocals renderer, correct song data, no mic conflict. | | | Renderer route used; otherwise Blocked → [#32]/[#46]/[#47]. |
-| Two vocals panels | Select each panel as scoring target; only one stream owns the mic, panel state stays separate. | | | Target-switch screenshot and the single owner; route, else Blocked → [#32]/[#46]/[#47]. |
-| Layout | Narrow/wide panels at standard and high DPI keep lyrics, lanes, controls, and score legible. | | | Narrow and wide captures at both scales; route, else Blocked → [#32]/[#46]/[#47]. |
+| Duet | Confirm the other parts draw as guide bars on the scored voice's pitch axis. Part switching has no control in 1.13.0, so record the primary voice only (see the note above). | | | Guide bars on the ribbon today; the stage half runs from the **Fullscreen** button. |
+| Single panel | Solo, incomplete-pitch, and lyrics-only packs draw appropriately. | | | One screenshot per pack; the stage half runs from the **Fullscreen** button. |
+| Mixed split | Vocals plus instrument panel; one vocals renderer, correct song data, no mic conflict. | | | Splitscreen route used (`Saved panel pref` or `Registry-fetch fallback`); record which. |
+| Two vocals panels | Select each panel as scoring target; only one stream owns the mic, panel state stays separate. | | | Target-switch screenshot and the single owner; record the splitscreen route used. |
+| Layout | Narrow/wide panels at standard and high DPI keep lyrics, lanes, controls, and score legible. | | | Narrow and wide captures at both scales; record the splitscreen route used. |
 | Rollback | Return to previous compatible plugin release; prepared song data still opens. | | | Before/after hashes per the rollback procedure, plus the host commit. |
 
 ## Automated evidence
 
-Recorded 2026-10-06 on `main` at commit `0eaebf6`: **130 pytest cases and
-215 `node --test` cases, all green** (`python -m pytest -q tests`,
-`npm test`). These pin the four "no known bug" criteria against the stub
-host, so the rows above only re-confirm them on a real one.
+Recorded on `main` at commit `95f3e5f`: **183 pytest cases (including
+`test_rollback.py`) and 220 `node --test` cases, all green**
+(`python3 -m pytest -q tests`, `npm test`). These pin the four "no known bug"
+criteria against the stub host, so the rows above only re-confirm them on a
+real one. Re-measure rather than trusting the numbers — they move with every
+follow-up PR.
+
+Earlier, recorded 2026-10-06 on `main` at commit `0eaebf6`: 130 pytest cases
+and 215 `node --test` cases, all green.
 
 Recorded 2026-10-07 on release PR
 [#55](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/pull/55),
 branched from `main` at commit `58e950a`: **131 pytest cases (including
-`test_rollback.py`) and 220 `node --test` cases** — provisional, the
-target counts; the PR's own CI run was red on `ci / python` and
-`vocals-release-gate` because the zip-form pack tried to unpack into
-`/app` (now fixed in `tests/test_rollback.py`), so the counts are not a
-recorded pass until that run is green. The rollback case
+`test_rollback.py`) and 220 `node --test` cases**. That PR's CI run was red
+on `ci / python` and `vocals-release-gate` because the zip-form pack tried to
+unpack into `/app`; the fix landed in `tests/test_rollback.py`, and the suite
+has been green on `main` since (see the counts above). The rollback case
 `test_rollback_hashes_survive_plugin_swap` loads `v1.12.0`'s `routes.py`
 from the git tree as a separate module, prepares directory-form and
 zip-form packs under the release candidate, hashes the sidecars, swaps
@@ -392,17 +415,14 @@ private song titles, and microphone device names before sharing.
 - [ ] Screenshots are attached to the release PR.
 - [ ] No known microphone leak, duplicate renderer, stale timer, or
       cross-panel state bug remains.
-- [ ] CI passes from a clean checkout (`python -m pytest tests` — 131
-      cases; `npm test` — 220 cases; `npm run lint`). Provisional until the
-      PR's own CI run is green; the counts above are the target, not a
-      recorded pass.
+- [ ] CI passes from a clean checkout (`python3 -m pytest tests` — 183
+      cases; `npm test` — 220 cases; `npm run lint`).
 - [ ] Rollback is verified in `tests/test_rollback.py` — the release
       candidate can be rolled back to `v1.12.0` without changing prepared
       song data. The remaining checklist item is recording the actual
       operator-run hashes and screenshots on the release PR.
 
 [#17]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/17
-[#32]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32
 [#35]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/35
 [#39]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/pull/39
 [#44]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44
@@ -410,3 +430,4 @@ private song titles, and microphone device names before sharing.
 [#46]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/46
 [#47]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47
 [#59]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/59
+[#63]: https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63

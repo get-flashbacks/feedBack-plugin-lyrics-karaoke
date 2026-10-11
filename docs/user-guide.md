@@ -23,8 +23,9 @@ Preparation can use a remote alignment service and the Python audio stack,
 so it is the heavier half. Songs can also be prepared once and used forever;
 existing packs do not need regeneration.
 
-**Playback** happens inside FeedBack's player, on the plugin's pitch ribbon.
-It only ever reads the prepared data — through
+**Playback** happens inside FeedBack's player, either on the plugin's pitch
+ribbon (the **Karaoke** button) or on the highway renderer (the **Fullscreen**
+button). Both only ever read the prepared data — through
 `GET /api/plugins/lyrics_karaoke/playback`, which never runs pitch
 extraction, loads no audio model, and touches no microphone state by itself.
 So a song you prepared keeps playing with no alignment service, no Python
@@ -84,19 +85,26 @@ plays — in **lyrics-only mode**, without pitch slabs or scoring.
 
 ## Play and score
 
-In the player, choose a **Vocals** arrangement and turn on the **Karaoke**
-button. The ribbon draws pitch lanes, note slabs, timed syllables, and a
-lyric line with a bouncing cue under the syllable you are on — across a
-silent lead-in that cue becomes a get-ready countdown. Scored pitches and
-guide bars share one song-wide pitch axis, so a harmony an octave above the
-lead still sits on the strip.
+In the player, choose a **Vocals** arrangement. Two controls drive karaoke,
+and each shows a different view:
+
+- **Karaoke** turns on the pitch ribbon: one bar per syllable, vertically
+  positioned by pitch, with the lyric text and a bouncing cue under the
+  syllable you are on — across a silent lead-in that cue becomes a
+  get-ready countdown. Scored pitches and guide bars share one song-wide
+  pitch axis, so a harmony an octave above the lead still sits on the
+  strip. The **Karaoke** button and ribbon work with no microphone
+  whatsoever.
+- **Fullscreen** swaps the player's whole highway for the immersive karaoke
+  stage — note slabs, pitch lanes, timed syllables, duet guide bars, and an
+  end-of-song summary card — and is available even without pitch data. See
+  [Fullscreen (stage view)](#fullscreen-stage-view) below.
 
 Click the shared **🎤** control only when you want to be scored. With the
 microphone listening you get a live trace of the pitch you sang at the
 playhead and a red→amber→green accuracy tint on what you have sung. The
 readout beside 🎤 shows the note you are singing; the highway renderer
-extends it with accuracy and streak (`F4 · 92% · ×5`-style). The
-**Karaoke** button and the ribbon work with no microphone whatsoever.
+extends it with accuracy and streak (`F4 · 92% · ×5`-style).
 
 Microphone scoring has one state machine you can see in the control:
 
@@ -110,16 +118,38 @@ Microphone scoring has one state machine you can see in the control:
 | Blocked | Disabled with the Note Detect reason shown; 1.15.2 or newer is required |
 | Error | Capture stopped with the reason shown — permission denied, no microphone, device in use, device disconnected, or an audio context that would not start ("Audio is suspended. Click 🎤 again."). Click 🎤 to retry |
 
+## Fullscreen (stage view)
+
+The **Fullscreen** button sits in the main player's control row beside the
+shared 🎤 control once a sloppak song is loaded. It installs the highway
+renderer over the current highway for the immersive stage; **Fullscreen ✓**
+leaves it again. It works on any sloppak song — the stage needs no pitch
+data, and a lyrics-only song draws a flat lyric ribbon — and it needs only a
+host with `highway.setRenderer` (the same `minHost` floor as the rest of the
+renderer).
+
+Entering fullscreen remembers what was showing, and leaving puts it back:
+exit re-installs the visualization that was active before you entered,
+whether that was 3D Highway, Piano, or the default 2D highway, so the song
+does not suddenly look different afterwards. If nothing was on before, or
+the remembered visualization is no longer installed, you get the default
+highway without an error. Leaving the player screen, or switching songs,
+exits fullscreen first.
+
+While the stage is up it owns playback and the microphone exactly as a
+splitscreen panel would: the **Karaoke** ribbon stands down and no second
+scorer runs, and the shared 🎤 control's device and channel pickers belong
+to the stage's mic row.
+
 ## Settings
 
 Karaoke is deliberately low-control. The **🎤** control is the one thing
-both paths share: it starts and stops capture, and it is the only path to
+both views share: it starts and stops capture, and it is the only path to
 the microphone.
 
-Three more controls belong to the highway renderer only. Since 1.13.0 the
-only route to that renderer is through splitscreen — a panel that already
-had Lyrics Karaoke saved as its visualization (see the README's migration
-note) — and these controls are built only while such a panel is mounted:
+Three more controls belong to the highway renderer only, and they are built
+while a renderer instance is live — the **Fullscreen** stage, or a splitscreen
+panel that already had Lyrics Karaoke saved as its visualization:
 
 - **Microphone input** — a default-mic or multichannel picker; the saved
   device is re-selected when present and otherwise falls back safely.
@@ -162,8 +192,9 @@ defaults above (the three engine ones read out of `lyrics_karaoke.prefs.v1`).
 Editing that document in the browser console changes the three engine
 preferences for panels opened afterwards; the three panel-scoped settings
 have no reachable setter at all, so **sung part stays on the primary voice**.
-Re-homing these into the karaoke UI is the remainder of
-[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
+A control surface that exposes them — with clear labels, bounds, and safe
+defaults — is tracked in
+[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 
 ## Microphone privacy and calibration
 
@@ -194,19 +225,19 @@ Both are engine preferences with no control in 1.13.0. They are stored in
 [Settings](#settings-with-no-control-today), so today the honest
 instruction is: judge the default against a short take, and if it does not
 fit, edit the stored value in the browser console and reopen the panel. A
-control returns with the remainder of
-[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
+control is tracked in
+[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 
 ## Duets and splitscreen
 
 **Duets.** A pack with `vocal_tracks` carries separate voices. All parts
-draw on one ribbon — the scored voice as note slabs, the others as thin
+draw on one ribbon — the scored voice as pitch bars, the others as thin
 guide bars — on one song-wide pitch axis. As of 1.13.0 the scored voice is
 always the **primary** one: the **Sung part** setting still exists and still
 re-anchors scoring state locally when it changes, but nothing renders a
 control for it (see [Settings](#settings-with-no-control-today)), so there
-is no in-app way to switch to a second part yet. That returns with
-[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32).
+is no in-app way to switch to a second part yet. Choosing a voice is part of
+[#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 
 **Splitscreen.** Every panel owns its renderer and its state; nothing is
 shared through module globals, so two vocals panels cannot overwrite each
@@ -230,25 +261,28 @@ the same song packs when rolling back.
 
 | Symptom | Check |
 | --- | --- |
-| The highway renderer isn't offered in the picker / Auto / splitscreen dropdown | Since 1.13.0 it is no longer listed there (migration in progress). The **Karaoke** button gives the ribbon; a saved splitscreen panel still loads the renderer. |
+| The highway renderer isn't offered in the picker / Auto / splitscreen dropdown | Since 1.13.0 it is no longer listed there. The **Karaoke** button gives the ribbon, the **Fullscreen** button opens the highway renderer, and a saved splitscreen panel still loads it. |
 | Song does not resolve on an old host | A song pack that is a symlink pointing outside the library is refused by the pre-`0dcc913` fallback; update the host. |
 | Lyrics but no pitch slabs | Generate pitch for that song; lyrics-only playback is supported. |
 | No microphone scoring | Click 🎤, grant browser permission, and sing a pitched part. |
-| Wrong input or channel | The device and Mix / Ch 1 / Ch 2 pickers live on the renderer's mic row, reachable only from a saved Lyrics Karaoke splitscreen panel (see [Settings](#settings)); the **Karaoke**-button ribbon reuses the saved device and channel. Reconnect a missing device and start capture again. |
+| Wrong input or channel | The device and Mix / Ch 1 / Ch 2 pickers live on the renderer's mic row, reachable whenever the renderer is live — the **Fullscreen** stage or a saved Lyrics Karaoke splitscreen panel (see [Settings](#settings)); the **Karaoke**-button ribbon reuses the saved device and channel. Reconnect a missing device and start capture again. |
 | Microphone says busy or unavailable | Another application or panel holds the device. Release it, then click 🎤 again. |
 | The 🎤 control is disabled | An older Note Detect (< 1.15.2) is installed; update Note Detect and click 🎤 again. |
-| Voice appears late or early | There is no calibration control in 1.13.0: edit the mic timing offset in `lyrics_karaoke.prefs.v1` (see [Settings](#settings-with-no-control-today)) and reopen the panel. |
+| Voice appears late or early | There is no calibration control in 1.13.0: edit the mic timing offset in `lyrics_karaoke.prefs.v1` (see [Settings](#settings-with-no-control-today)) and reopen the panel ([#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63)). |
 | Build Karaoke rejects the save | The alignment result had no usable segments (missing or invalid start/end times). Existing lyrics are left untouched, so re-run alignment. A partial result still saves its usable segments and the response reports how many were dropped. |
 | Pack fails to load | Check that `lyrics.json` and `vocal_pitch.json` referenced by the manifest are valid JSON; malformed packs are reported separately from missing ones. |
 | Session score looks stale | Play/pause/seek/song-switch are all pinned; if anything survives a transport change, report it. |
 
 ## Screenshots
 
-Actual screenshots must come from a running FeedBack host with
-[#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)'s
-presentation landed, so the states below are **provisional** until then:
-this documents the shot list, not final captures. Generate copyright-free
-test media with
+Screenshots must come from a running FeedBack host; this section is the shot
+list, not final captures. Since the **Fullscreen** control shipped
+([#46](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/46),
+[#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47))
+every state below is reachable on a current host, so the captures are now
+the remaining human work of the release matrix, tracked in
+[#43](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/43).
+Generate copyright-free test media with
 `python tests/fixtures/generate_feedpaks.py OUTPUT_DIR` (or grab the
 `vocals-synthetic-packs` CI artifact) so no private songs appear, then
 capture the states below:
