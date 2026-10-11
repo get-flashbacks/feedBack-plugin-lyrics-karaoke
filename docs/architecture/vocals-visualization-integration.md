@@ -3,19 +3,25 @@
 Status: **Accepted** — resolves [#10](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/10),
 part of epic [#18](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/18).
 
-> **Superseded in part by [#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44)**
-> (first sub-issue of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)):
+> **Superseded in part by [#44](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/44),
+> completed by [#46](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/46)
+> and [#47](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/47)**
+> (the steps of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32),
+> all closed):
 > the renderer no longer declares `type: "visualization"`, and every viz list
 > built from `/api/plugins` filters on `type`, so it leaves core's viz picker,
-> core's Auto mode, and splitscreen's per-panel dropdown on that path. The renderer,
+> core's Auto mode, and splitscreen's per-panel dropdown on that path. In its
+> place the **Fullscreen** control in the main player installs the renderer
+> directly through `highway.setRenderer()`, and exiting restores the
+> visualization that was active beforehand by its persisted id. The renderer,
 > its lifecycle, ownership model, and payload contract are unchanged —
 > `window.feedBackViz_lyrics_karaoke` (plus the legacy
 > `window.slopsmithViz_lyrics_karaoke` alias) remains the whole install
 > contract, so a consumer that resolves the id by prefix still gets a working
 > renderer.
-> Sections that described the picker/Auto path are marked below; the rest of
-> #32 re-homes selection into the karaoke UI and is where the presentation
-> decisions land.
+> Sections that described the picker/Auto path are marked below. The renderer's
+> scoring settings still have no control surface; that is tracked in
+> [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 
 This document defines the boundary between Lyrics Karaoke's existing
 preparation pipeline and a new FeedBack visualization provider derived from
@@ -50,7 +56,7 @@ data contract before writing code.
 ### Visualization provider (#14 shipped, #15 in progress) — owns playback
 
 - Registers `renderer.create`/`renderer.destroy` under the **existing**
-  plugin id `lyrics_karaoke` (see [Manifest scope](#manifest-scope-one-plugin-two-roles)).
+  plugin id `lyrics_karaoke` (see [Manifest scope](#manifest-scope-one-plugin-one-role-since-44)).
   Consumes `/playback`; runs no extraction logic of its own.
 - Owns rendering (ported from Karaoke Highway's `screen.js` across #15's
   phases), microphone capture, live scoring, its own settings namespace,
@@ -83,8 +89,9 @@ secondary flat guide bars on one shared axis). `/playback` translates
 transport-only and never reads manifest extensions itself.
 - **#44 retired the picker/Auto entry.** The renderer is no longer a
   candidate the host selects: the manifest declares no `type`, and the
-  factory publishes no `matchesArrangement`. Selection moves into the
-  karaoke UI (#32's remaining sub-issues); see [Renderer
+  factory publishes no `matchesArrangement`. Selection moved to the
+  **Fullscreen** control (#46), which installs the factory directly and
+  restores the prior visualization on exit (#47); see [Renderer
   selection](#renderer-selection-retired-in-44).
 
 **As shipped in #14** (`screen.js`, "Visualization provider" section):
@@ -95,9 +102,10 @@ transport-only and never reads manifest extensions itself.
   its own idempotency guard (`__feedBackLyricsKaraokeVizRegistered`),
   separate from the script's `HOOK_KEY` bootstrap guard, and runs at script
   evaluation rather than on `DOMContentLoaded`, because a renderer consumer
-  (a splitscreen panel, or #32's karaoke UI) may enumerate `feedBackViz_*`
-  before then. Since #44 these two globals are the *entire* install
-  contract — nothing in the manifest advertises the renderer.
+  (a splitscreen panel, the Fullscreen control, or any other consumer) may
+  enumerate `feedBackViz_*` before then. Since #44 these two globals are the
+  *entire* install contract — nothing in the manifest advertises the
+  renderer.
 - Registration is **unconditional**, and that is the safe-degradation path:
   a host below the minimum version simply never reads the global, so it is
   inert and the legacy overlay keeps owning playback. Probing for
@@ -116,7 +124,8 @@ transport-only and never reads manifest extensions itself.
   ever persisted. With the manifest declaration gone no host renders them, so
   an installed renderer runs on `VIZ_SETTING_DEFAULTS` (with the engine
   preferences still supplying `tolerance` / `octaveIndependent` /
-  `micOffsetMs`) until #32 re-homes the controls into the karaoke UI.
+  `micOffsetMs`) until a control surface is added, tracked in
+  [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 - Events: `lyrics_karaoke:renderer-ready`
   (`{filename, arrangementIndex, schemaVersion, voiceId, voices, tokens, pitched}`)
   and `lyrics_karaoke:renderer-failed`
@@ -134,8 +143,9 @@ transport-only and never reads manifest extensions itself.
 
 ### The ribbon absorbs the stage's capabilities inline (#45)
 
-The overlay is now the main player's only route to karaoke (#44 retired the
-picker entry), so #45 — the second sub-issue of
+The overlay is now one of the main player's two routes to karaoke (#44
+retired the picker entry; #46 added the explicit **Fullscreen** control),
+so #45 — the second sub-issue of
 [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)
 — grows the highway's features **into the existing ribbon** rather than
 swapping in the stage. Same chart, same playhead, same toggle: it must read as
@@ -215,7 +225,8 @@ carrying every contract the ported renderer needs: the `setRenderer`
 lifecycle, per-instance visualization settings (`applySetting`/`getSetting`,
 feedBack#849), and the `highway:visibility` event. (`matchesArrangement`
 Auto-mode was part of this list when the renderer was picker-visible; #44
-retired it, and the rest of #32 re-homes selection into the karaoke UI.)
+retired it, and #46/#47 replaced it with the explicit **Fullscreen**
+control.)
 Hosts older than this get the legacy overlay
 unconditionally — there is no partial-feature degradation path, since the
 renderer cannot register at all without `setRenderer`.
@@ -328,23 +339,26 @@ block (the new renderer) — nothing in the plugin contract (see
 **#44 removed the second role from the manifest.** `type: "visualization"`
 and the `visualization` capability block are gone, so the host's viz picker
 no longer lists this plugin and Auto no longer selects it — which is exactly
-what #32 asks for (one karaoke toggle instead of a separate pickable entry).
+what #32 asked for (a karaoke-owned entry instead of a separately pickable
+visualization).
 `type` also gates core's `ui.player-overlays` registration for the picker
 region, so that contribution is withdrawn with it. Per core's contract, `type`
 only ever controlled discovery: nothing about it was load-bearing for the
-renderer itself, and the plugin never called `highway.setRenderer()` itself —
-core's picker/Auto pass and splitscreen's `enterVizMode` were the call sites.
+renderer itself, and the plugin now calls `highway.setRenderer()` itself only
+through the explicit **Fullscreen** control (#46) — core's picker/Auto pass
+and splitscreen's `enterVizMode` were the automatic call sites.
 Splitscreen builds its own per-panel dropdown from the same `type` filter
 (`vizPlugins = plugins.filter(p => p?.type === 'visualization')`), so its
 *discovery* of this plugin goes too. Its `VIZ_FACTORY_PREFIXES` probe is
-resolution, not discovery, and two routes still reach the factory: a panel
+resolution, not discovery, and three routes reach the factory: the
+**Fullscreen** control's direct install (#46), a panel
 that already persisted `__viz__:lyrics_karaoke:<arrangement name>` in
 `splitscreenPanelPrefs` (`panelToPrefs().arrName`), and the
 `_rescanVizPluginsFromWindow()` fallback that runs when the plugin registry
 fetch fails — that scan looks at `window` only and carries no `type`, so a
-host that cannot reach `/api/plugins` will still offer the plugin. Until the
-rest of #32 lands, a saved panel preference is the only route that does not
-depend on a fetch failure.
+host that cannot reach `/api/plugins` will still offer the plugin. The
+Fullscreen control and a saved panel preference both work without any fetch
+failure.
 
 ## Canonical payload schema
 
@@ -441,8 +455,13 @@ selects which voice receives the primary slab/lyric treatment.
 **This section records how selection worked while the renderer was a
 picker-visible provider, and why #44 removed that path. It is kept because
 the analysis behind feedBack#84 is still live upstream.** Current state: the
-host neither lists nor auto-selects this plugin, and the remaining
-sub-issues of #32 put selection in the karaoke UI.
+host neither lists nor auto-selects this plugin. Selection comes from the
+explicit **Fullscreen** control (#46), which installs the factory through
+`highway.setRenderer()` and, on exit, re-installs the visualization that was
+active beforehand by persisted id (#47) — falling back to the default highway
+when that id no longer resolves. A splitscreen panel that already saved the
+preference and the fetch-failure `window` scan remain the other resolution
+routes; see [Manifest scope](#manifest-scope-one-plugin-one-role-since-44).
 
 Auto mode picks the first registered `matchesArrangement(songInfo)` match,
 in plugin registration order. The provider used to declare:
@@ -522,6 +541,39 @@ Lyrics-only content (no `vocal_pitch.json`, `midi` absent from every token)
 is a valid response shape from `/playback`, not an error — the renderer
 falls back to a flat lyric ribbon, matching Karaoke Highway's documented
 behavior for pitch-less songs.
+
+### Fullscreen control: the explicit entry point (#46/#47)
+
+With the picker/Auto path retired, #46 added the one user-facing route to the
+renderer: a **Fullscreen** button in the main player's control row, created by
+`ensureFullscreenButton()` and inserted after the shared mic pill
+(`btn-karaoke-mic-pill`, else `btn-karaoke-mic`). `refreshFullscreenButton()`
+hides it for non-sloppak songs and whenever `window.highway.isVisible()` is
+false, so it is a main-player control that never appears inside a splitscreen
+panel; it stays visible (and its click no-ops) on a host without
+`highway.setRenderer`.
+
+Entering calls `window.feedBackViz_lyrics_karaoke()` (or `.createRenderer()`)
+and hands the instance to `window.highway.setRenderer()`. The closure-local
+`_fullscreenActive` flag drives the button's `Fullscreen` / `Fullscreen ✓`
+label and `aria-pressed`. It carries no pitch-data precondition — a lyrics-only
+sloppak draws the flat lyric ribbon — so the button is the entry point for
+both.
+
+Exiting restores what was showing. The host exposes no renderer getter (its
+api object ends at `isDefaultRenderer()` and the renderer slot is
+closure-private), so the replaced renderer can only be remembered as the id
+the picker persisted: `_persistedVizSelection()` reads
+`localStorage.vizSelection` first (it survives the picker being absent) and
+falls back to the `#viz-picker` value for hosts where storage is blocked. On
+exit, `window.setViz(previousId)` rebuilds that visualization the way core's
+own restore path does and degrades to the default highway when the id no
+longer resolves; with no remembered id the exit calls
+`window.highway.setRenderer(null)`. `resetForNewSong` and leaving the player
+screen both call `_fullscreenExit()` first, so a song switch never leaves a
+stale renderer installed. Ownership follows the usual 0↔1 live-instance
+transition: the installed instance suppresses the legacy overlay and
+note_detect while it is live.
 
 ## Microphone and settings ownership
 
@@ -648,8 +700,9 @@ behavior for pitch-less songs.
   #44 the manifest no longer declares them**, and since the plugin is no
   longer a discovered provider at all there is no Viz ⚙ popover to hang them
   on; the values still resolve through `VIZ_SETTING_DEFAULTS` (with the engine
-  preferences supplying the three scoring keys), and #32's remaining
-  sub-issues re-home them into the karaoke UI.
+  preferences supplying the three scoring keys), and a control surface
+  re-homing them into the karaoke UI is tracked in
+  [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
 
 ## Vocal pitch engine (#11)
 
@@ -765,8 +818,9 @@ there is no second YIN implementation, microphone path, or scorer.
 - Hosts older than `0.3.0-alpha.1` ignore the visualization provider fields
   and continue to use the legacy overlay path.
 - On supported hosts, nothing in the manifest offers the provider any more
-  (#44), so the karaoke toggle and the legacy overlay own playback unless a
-  consumer installs the factory itself. Either way the provider does not
+  (#44), so the karaoke toggle and the legacy overlay own playback until a
+  consumer installs the factory itself — the **Fullscreen** control (#46) or
+  a saved splitscreen panel preference. Either way the provider does not
   write chart data, so rollback does not require deleting or regenerating
   song files.
 - The provider and overlay never render/scoring controls simultaneously: a
@@ -800,8 +854,8 @@ Both directions of this port stay AGPL-3.0:
 ## Testing strategy
 
 Everything below ships. Two suites run from a clean checkout with no
-copyrighted media: **130 pytest cases and 215 `node --test` cases**, both
-green on this branch (`python -m pytest -q tests`, `npm test`). Re-measure
+copyrighted media: **183 pytest cases and 220 `node --test` cases**, both
+green on this branch (`python3 -m pytest -q tests`, `npm test`). Re-measure
 rather than trusting the numbers — they move with every follow-up PR.
 
 The pattern is content-free, synthesized fixtures (no real song or lyric

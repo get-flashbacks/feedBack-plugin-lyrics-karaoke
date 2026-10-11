@@ -51,7 +51,15 @@ Top-level `addEventListener` / `setInterval` calls must be guarded by a `window.
 
 ## Migration status
 
-Since 1.13.0 the highway renderer is **not** selectable from any host control. The Karaoke button drives the legacy pitch ribbon. Existing splitscreen panels that already saved Lyrics Karaoke as their viz keep loading it. Do not add host-control surface without updating `plugin.json` capabilities and the architecture doc.
+Since 1.13.0 the highway renderer is **not** listed in the host's
+visualization picker, Auto mode, or splitscreen per-panel dropdown (#44
+retired `type`). It stays reachable through resolution: the **Fullscreen**
+control in the main player installs it directly (#46/#47), and existing
+splitscreen panels that already saved Lyrics Karaoke as their viz keep
+loading it. The **Karaoke** button drives the legacy pitch ribbon. The
+renderer's scoring/calibration settings still have no in-app control (#63).
+Do not add host-control surface without updating `plugin.json` capabilities
+and the architecture doc.
 
 ## Backend path containment
 
