@@ -90,6 +90,42 @@ uses the tracks when at least one has usable lyrics, guarantees exactly one
 primary voice, and rejects duplicate voice ids. If no usable track exists,
 it falls back to the singular keys.
 
+## Preparation target resolution
+
+The preparation routes (`POST /align`, `POST /save-lyrics`,
+`POST /generate-pitch`) and `GET /status` accept an optional `voice` id — a
+`vocal_tracks` entry `id` — and all four resolve it through the same helper so
+they agree on which track the wizard is working on.
+
+- **Default.** No `voice` (or an empty string) resolves to the effective
+  primary: the first entry flagged `primary`, else the first addressable entry.
+  For a solo pack, and for a `vocal_tracks` list with no primary flag, this is
+  the synthetic `primary` voice that owns the legacy singular sidecars.
+- **Writes target the track's own files.** The sidecar a save or pitch job
+  writes is the resolved entry's own `lyrics`/`vocal_pitch` pointer, never a
+  shared hardcoded name — so a secondary voice cannot clobber the primary's
+  files. When the pointer is absent, unsafe, or would escape the pack, the
+  track falls back to a per-voice default: the primary inherits the singular
+  alias (or `lyrics.json`/`vocal_pitch.json`), a secondary uses
+  `<id>.lyrics.json`/`<id>.vocal_pitch.json`.
+- **The primary keeps the aliases in sync.** After a primary write the singular
+  `lyrics`/`vocal_pitch` keys are re-pointed at the primary's files, preserving
+  the additive-extension guarantee that older readers see the primary through
+  the singular keys. A secondary write never touches them.
+- **Validation is up front.** Duplicate voice ids are rejected for every pack
+  (422), and an unknown requested id is a 422 that leaves the pack untouched.
+  `/status` returns 422 too, rather than reporting mixed readiness for a pack it
+  cannot address.
+- **`/status` describes the resolved voice.** Its `has_lyrics`/`has_pitch`/
+  `pitch_count` come from the resolved track's own files, and it echoes both
+  the resolved `voice` and the full `voices` summary so the UI can build a
+  picker. `/align` and `/save-lyrics` echo the resolved `voice` in their
+  response.
+
+A solo pack is unchanged: with no `vocal_tracks` and no `voice`, every route
+takes the legacy singular path and the status summary reports the single
+`primary` voice.
+
 ## Consumer obligations
 
 The visualization provider:

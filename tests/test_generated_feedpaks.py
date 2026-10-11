@@ -88,9 +88,10 @@ DATA_EXPECTATIONS = {
     "lyrics-only": (404, None),
 }
 
-# `/status` readiness flags, all of them sourced from the singular manifest
-# keys — so a duet reports the primary voice's two pitch notes, not the
-# track list's three.
+# `/status` readiness flags, sourced from the resolved target voice's sidecar
+# pointers. With no `voice` query the server resolves the primary track, whose
+# own pair matches the singular alias — so a duet still reports the primary
+# voice's two pitch notes, not the track list's three.
 STATUS_FLAGS = {
     "single-voice": {"is_sloppak": True, "has_vocals": True, "has_lyrics": True,
                      "has_pitch": True, "pitch_count": 2},
@@ -100,6 +101,23 @@ STATUS_FLAGS = {
                          "has_pitch": True, "pitch_count": 1},
     "lyrics-only": {"is_sloppak": True, "has_vocals": True, "has_lyrics": True,
                     "has_pitch": False, "pitch_count": 0},
+}
+
+# `/status` voices summary + the resolved default voice for each fixture.
+STATUS_VOICES = {
+    "single-voice": (
+        [{"id": "primary", "name": "Vocals", "primary": True}], "primary",
+    ),
+    "duet": (
+        [{"id": "lead", "name": "Lead", "primary": True},
+         {"id": "harmony", "name": "Harmony", "primary": False}], "lead",
+    ),
+    "incomplete-pitch": (
+        [{"id": "primary", "name": "Vocals", "primary": True}], "primary",
+    ),
+    "lyrics-only": (
+        [{"id": "primary", "name": "Vocals", "primary": True}], "primary",
+    ),
 }
 
 
@@ -198,7 +216,10 @@ def test_status_route_reports_generated_readiness(client, kind):
     status = client.get("/api/plugins/lyrics_karaoke/status",
                         params={"filename": f"{kind}.sloppak"}).json()
 
-    assert status == {"filename": f"{kind}.sloppak"} | STATUS_FLAGS[kind]
+    voices, voice = STATUS_VOICES[kind]
+    assert status == {
+        "filename": f"{kind}.sloppak", "voice": voice, "voices": voices,
+    } | STATUS_FLAGS[kind]
 
 
 # ── GET /data ────────────────────────────────────────────────────────────────

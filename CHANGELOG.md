@@ -12,6 +12,26 @@ and the repository's tagged history.
 
 ### Fixed
 
+- Preparing a duet no longer writes the wrong voice or reports success while
+  playback serves stale files
+  ([#61](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/61)).
+  `POST /save-lyrics` and `POST /generate-pitch` wrote the hardcoded
+  `lyrics.json`/`vocal_pitch.json` and patched only the singular manifest alias,
+  but `GET /playback` reads each `vocal_tracks` entry's own `lyrics`/
+  `vocal_pitch` pointer — so with a track whose pointer was, say, `lead.json`,
+  the prepare step reported success and playback kept serving the old sidecar.
+  Both routes, plus `POST /align` and `GET /status`, now take an optional
+  `voice` id: the write targets that track's own files and, for the **primary**
+  voice only, keeps the singular aliases in sync. An unknown id is a 422 that
+  leaves the pack untouched, duplicate ids are rejected up front, and an unsafe
+  pointer in the manifest is ignored in favor of the track's default filename —
+  a secondary voice never overwrites another track's sidecars. The setup
+  wizard gains a **Vocal part** picker that appears only for a duet and pins
+  the whole build (align → save → extract) to the chosen part. A solo pack is
+  unchanged: no `voice` still resolves to the legacy hardcoded names.
+  `tests/test_voice_preparation.py` covers primary/secondary writes, alias
+  sync, `/playback` agreement, unknown/duplicate ids, per-voice `/status`
+  flags, and the solo default.
 - A pitch sidecar whose numbers overflow or are malformed can no longer crash
   playback ([#62](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/62)).
   Python's JSON decoder accepts the `NaN`/`Infinity` literals and turns `1e309`
