@@ -3660,34 +3660,48 @@
             : (row.desc.title || '');
     }
 
+    /** The cluster only belongs on screen while the highway is visible and a
+     *  live panel can answer for it. */
+    function _vizSettingsVisible(target) {
+        if (!target) return false;
+        if (typeof window === 'undefined' || !window.highway || typeof window.highway.isVisible !== 'function') return true;
+        return window.highway.isVisible();
+    }
+
+    /** Push one descriptor's live value into its control. */
+    function _vizSyncSettingRow(row, desc, target) {
+        const value = target.getSetting(desc.key);
+        const resolved = value === undefined ? VIZ_SETTING_DEFAULTS[desc.key] : value;
+        if (desc.kind === 'toggle') {
+            row.input.checked = resolved !== false;
+        } else if (desc.kind === 'range') {
+            row.input.value = String(resolved);
+            if (row.readout) row.readout.textContent = _vizSettingReadout(desc, row.input.value);
+        } else if (desc.kind === 'voice') {
+            _vizPopulateVoiceOptions(row, target);
+        } else {
+            row.input.value = String(resolved);
+        }
+    }
+
+    function _vizSyncSettingRows(target) {
+        for (const desc of VIZ_SETTING_CONTROLS) {
+            const row = _vizSettingsUi.rows[desc.key];
+            if (row) _vizSyncSettingRow(row, desc, target);
+        }
+    }
+
     function _vizRefreshSettingsUi() {
         if (!_vizSettingsBtn || !_vizSettingsUi) return;
         const target = _vizSettingsTarget();
-        const mainVisible = (typeof window !== 'undefined' && window.highway && typeof window.highway.isVisible === 'function')
-            ? window.highway.isVisible() : true;
-        const show = !!target && mainVisible;
+        const show = _vizSettingsVisible(target);
         _vizSettingsBtn.style.display = show ? '' : 'none';
         if (!show) {
             if (_vizSettingsUi.open) _vizSetSettingsOpen(false);
             return;
         }
         if (!_vizSettingsUi.open) return;
-
-        for (const desc of VIZ_SETTING_CONTROLS) {
-            const row = _vizSettingsUi.rows[desc.key];
-            if (!row) continue;
-            const value = target.getSetting(desc.key);
-            if (desc.kind === 'toggle') {
-                row.input.checked = (value === undefined ? VIZ_SETTING_DEFAULTS[desc.key] : value) !== false;
-            } else if (desc.kind === 'range') {
-                row.input.value = String(value === undefined ? VIZ_SETTING_DEFAULTS[desc.key] : value);
-                if (row.readout) row.readout.textContent = _vizSettingReadout(desc, row.input.value);
-            } else if (desc.kind === 'voice') {
-                _vizPopulateVoiceOptions(row, target);
-            } else {
-                row.input.value = String(value === undefined ? VIZ_SETTING_DEFAULTS[desc.key] : value);
-            }
-        }
+        _vizSyncSettingRows(target);
     }
 
     // Set when a provider instance turned the legacy overlay off, so the
