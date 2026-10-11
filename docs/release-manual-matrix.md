@@ -254,11 +254,11 @@ Two clarifications before you start:
   observation half of `Duet` and `Single panel` can therefore be recorded
   against the ribbon now; their stage half runs from the **Fullscreen**
   button.
-- The ribbon and the renderer both have **no sung-part control** as of
-  1.13.0 (the manifest declares no settings, so nothing renders or calls
-  them; [#63] tracks the control surface). The scored voice is always the
-  primary one — record `Duet` on that basis rather than trying to switch
-  parts.
+- The legacy **Karaoke** ribbon has **no sung-part control** (the manifest
+  declares no settings, so nothing renders or calls them). The renderer's
+  **Settings** popover exposes **Sung part** and the other scoring/voice keys
+  (#63); the ribbon always scores the primary one, so record the ribbon half of
+  `Duet` on that basis.
 
 ## Results
 
@@ -278,9 +278,10 @@ cannot run as written.
 | Denied mic | Deny permission; lyrics continue, one actionable error appears, no retry loop. | | | Screenshot of the single error; console showing one request and no retries. |
 | Default mic | Click 🎤 and sing; trace and score update; stop releases the track. | | | Trace and score screenshot, plus the stopped state after the second click. |
 | Interface | Select multichannel device and Mix / Ch 1 / Ch 2; input follows selection. | | | Renderer route used (**Fullscreen** button or a splitscreen panel); record which. |
+| Settings | Open the renderer's **Settings** popover; the six controls render with their labels and defaults. Move **Pitch tolerance** / **Mic delay** and confirm every live panel changes; toggle **Live scoring** and confirm every panel stops scoring together and can be turned back on; switch **Sung part** / **Left rail** and confirm only the scoring panel changes. Reopen the popover and confirm the popover itself never prompts for the microphone. | | | Popover screenshot at both panel counts; the values read back from `lyrics_karaoke.prefs.v1`; a permission indicator showing no request from opening it. |
 | Disconnect | Unplug active device; capture stops, error appears, and reconnect requires a click. | | | Overlay error screenshot (`!` pill; full text in the 🎤 tooltip); no renderer needed (see entry points). |
 | Transport | Play, pause, seek forward/back, restart, switch songs, and reach end; no stale score or timer remains. | | | End-of-song score screenshot and a note that nothing kept ticking after the switch or the end. |
-| Duet | Confirm the other parts draw as guide bars on the scored voice's pitch axis. Part switching has no control in 1.13.0, so record the primary voice only (see the note above). | | | Guide bars on the ribbon today; the stage half runs from the **Fullscreen** button. |
+| Duet | Confirm the other parts draw as guide bars on the scored voice's pitch axis. On the renderer, switch **Sung part** in the **Settings** popover and confirm the scored voice changes; the ribbon scores the primary voice only (see the note above). | | | Guide bars on the ribbon today; the stage half runs from the **Fullscreen** button, with a screenshot of the **Sung part** picker switching the scored voice. |
 | Single panel | Solo, incomplete-pitch, and lyrics-only packs draw appropriately. | | | One screenshot per pack; the stage half runs from the **Fullscreen** button. |
 | Mixed split | Vocals plus instrument panel; one vocals renderer, correct song data, no mic conflict. | | | Splitscreen route used (`Saved panel pref` or `Registry-fetch fallback`); record which. |
 | Two vocals panels | Select each panel as scoring target; only one stream owns the mic, panel state stays separate. | | | Target-switch screenshot and the single owner; record the splitscreen route used. |
@@ -290,8 +291,9 @@ cannot run as written.
 ## Automated evidence
 
 Recorded on `main` at commit `95f3e5f`: **183 pytest cases (including
-`test_rollback.py`) and 220 `node --test` cases, all green**
-(`python3 -m pytest -q tests`, `npm test`). These pin the four "no known bug"
+`test_rollback.py`) and 226 `node --test` cases, all green**
+(`python3 -m pytest -q tests`, `npm test`); the #63 settings surface adds
+`tests/karaoke-settings.test.js` (6 cases) to the JS tally. These pin the four "no known bug"
 criteria against the stub host, so the rows above only re-confirm them on a
 real one. Re-measure rather than trusting the numbers — they move with every
 follow-up PR.

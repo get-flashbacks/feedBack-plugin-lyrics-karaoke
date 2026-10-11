@@ -47,6 +47,26 @@ and the repository's tagged history.
 
 ### Added
 
+- The renderer now exposes its scoring and voice settings through a
+  **Settings** popover
+  ([#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63)),
+  replacing the manifest descriptors retired in #44 with an in-app control
+  surface. A **Settings** button is built next to **Fullscreen** while a
+  renderer instance is live and opens a popover over six controls: **Pitch
+  tolerance**, **Ignore octave**, **Mic delay**, **Live scoring (mic)**,
+  **Sung part**, and **Left rail**. The three pitch controls are shared — they
+  fan out to every live panel and the legacy overlay and write through to
+  `lyrics_karaoke.prefs.v1`; **Live scoring** is shared too, so one switch
+  pauses every panel and no panel can be stranded unscored, while **Sung part**
+  and **Left rail** apply to the panel the microphone is scoring (or the first
+  live panel when none can score). **Sung part** options come from the loaded
+  song, primary first, and a part a later song no longer carries falls back to
+  the primary instead of scoring an empty take. Opening, refreshing, or changing
+  the popover never starts the microphone — turning live scoring off only
+  releases an already-running stream, and capture still starts only from the 🎤
+  click. `tests/karaoke-settings.test.js` covers the wiring, shared-vs-panel
+  scope, reload persistence, safe fallback, lyrics-only operation, and
+  teardown.
 - The **Karaoke** button's pitch ribbon now draws the highway's features
   directly ([#45](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/45),
   second step of [#32](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/32)).

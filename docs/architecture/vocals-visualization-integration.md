@@ -20,8 +20,9 @@ part of epic [#18](https://github.com/get-flashbacks/feedBack-plugin-lyrics-kara
 > contract, so a consumer that resolves the id by prefix still gets a working
 > renderer.
 > Sections that described the picker/Auto path are marked below. The renderer's
-> scoring settings still have no control surface; that is tracked in
-> [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
+> scoring and voice settings are exposed by a **Settings** popover the renderer
+> builds next to the **Fullscreen** control (#63); its shared/panel-local scope
+> is described under [Microphone and settings ownership](#microphone-and-settings-ownership).
 
 This document defines the boundary between Lyrics Karaoke's existing
 preparation pipeline and a new FeedBack visualization provider derived from
@@ -76,7 +77,7 @@ beat estimate and smoothed horizontal position are renderer-instance state,
 reset on song changes, so splitscreen panels cannot move one another's cue.
 
 **#15 final renderer polish (shipped):** the stage now includes selectable
-left-rail modes from the host settings popover: **Absolute tuner** (compact
+left-rail modes from the renderer's own Settings popover (#63): **Absolute tuner** (compact
 pitch scale plus the latest sung-pitch cursor), **Voice technique** (pitch
 lock/hold/find and current run guidance from the scoring state), and **Off**
 for dense/small panels. Finished scored takes draw an in-stage summary card
@@ -124,8 +125,9 @@ transport-only and never reads manifest extensions itself.
   ever persisted. With the manifest declaration gone no host renders them, so
   an installed renderer runs on `VIZ_SETTING_DEFAULTS` (with the engine
   preferences still supplying `tolerance` / `octaveIndependent` /
-  `micOffsetMs`) until a control surface is added, tracked in
-  [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
+  `micOffsetMs`). #63 adds the control surface back inside the plugin: a
+  **Settings** popover built by the renderer itself, driving the same
+  `applySetting` contract.
 - Events: `lyrics_karaoke:renderer-ready`
   (`{filename, arrangementIndex, schemaVersion, voiceId, voices, tokens, pitched}`)
   and `lyrics_karaoke:renderer-failed`
@@ -700,9 +702,15 @@ note_detect while it is live.
   #44 the manifest no longer declares them**, and since the plugin is no
   longer a discovered provider at all there is no Viz ⚙ popover to hang them
   on; the values still resolve through `VIZ_SETTING_DEFAULTS` (with the engine
-  preferences supplying the three scoring keys), and a control surface
-  re-homing them into the karaoke UI is tracked in
-  [#63](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/63).
+  preferences supplying the three scoring keys). #63 re-homes them into the
+  karaoke UI as the renderer's own **Settings** popover (`ensureSettingsButton`
+  / `_vizRefreshSettingsUi` in `screen.js`), whose controls call `applySetting`
+  on the live instance(s). The popover follows the same scope split the engine
+  already had: `micFeedback` and the three scoring keys fan out to **every** live
+  instance (the scoring keys writing through `_lkUpdatePrefs`), while `sungPart`
+  and `leftRailMode` apply to the scored panel only. Opening or refreshing it
+  never starts capture — turning **Live scoring** off may only release an
+  already-running stream.
 
 ## Vocal pitch engine (#11)
 
@@ -756,6 +764,25 @@ there is no second YIN implementation, microphone path, or scorer.
   picker support interfaces presenting one stereo
   device. Both apply without reloading — a channel change on the next
   buffer, a device change by restarting the stream for the same owner.
+- **Settings popover (#63).** The renderer builds a **Settings** button beside
+  the shared 🎤 row whenever an instance is live, opening a popover over the
+  same six `applySetting` keys the manifest used to declare. Its rows come from
+  the `VIZ_SETTING_CONTROLS` descriptor table (key, label, kind, and scope), so
+  the shared/panel-local split is data, not UI code: `micFeedback`, `tolerance`,
+  `octaveIndependent`, and `micOffsetMs` are `scope: 'shared'` and fan out to
+  every live instance (each write-through persisting the engine document),
+  while `sungPart` and `leftRailMode` are `scope: 'instance'` and hit
+  `_vizSettingsTarget()` — the mic target, else the first live panel.
+  `sungPart` options are built from the instance's `getVoices()` (primary
+  first, capped at the four parts that resolver addresses) and a part the
+  payload no longer carries is sanitized back to `primary` inside
+  `applySetting`/`selectVoice`, so a voice dropped between songs cannot leave a
+  panel scoring an empty take. The button and popover are refreshed on instance
+  add/remove, song load, and scoring-target change, and disappear with the last
+  instance. Because only `applySetting` is called — the same explicit-action
+  entry point the host used — the popover never starts capture; turning live
+  scoring off may release an already-active stream, and capture still starts
+  only from the 🎤 click.
 - **Settings namespace.** Engine preferences are one versioned document,
   `lyrics_karaoke.prefs.v1` =
   `{v, deviceId, channel, tolerance, octaveIndependent, micOffsetMs}`. The
