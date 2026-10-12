@@ -172,7 +172,7 @@ def test_valid_save_succeeds_without_dropped_key(tmp_path):
     ])
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"ok": True, "lyrics_count": 2}
+    assert resp.json() == {"ok": True, "lyrics_count": 2, "voice": "primary"}
     assert json.loads((pack / "lyrics.json").read_text(encoding="utf-8")) == [
         {"t": 0.0, "d": 0.5, "w": "la"},
         {"t": 0.5, "d": 0.5, "w": "la"},
@@ -191,7 +191,7 @@ def test_partial_invalid_save_writes_valid_entries_and_reports_dropped(tmp_path)
     ])
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"ok": True, "lyrics_count": 1, "dropped_count": 1}
+    assert resp.json() == {"ok": True, "lyrics_count": 1, "dropped_count": 1, "voice": "primary"}
     assert json.loads((pack / "lyrics.json").read_text(encoding="utf-8")) == [
         {"t": 1.0, "d": 0.5, "w": "ok"}
     ]

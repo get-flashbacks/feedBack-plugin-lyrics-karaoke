@@ -13,16 +13,23 @@ form is re-zipped with a one-time ``.bak``). The frontend can run them
 in sequence as a single "Build Karaoke" action, or independently when
 one of the two artifacts already exists.
 
+Duet packs carry multiple ``vocal_tracks``. The preparation routes take an
+optional ``voice`` id selecting which track to prepare: the write targets that
+track's own sidecars and, for the primary voice only, keeps the singular
+``lyrics``/``vocal_pitch`` aliases in sync so ``/playback`` and older readers
+agree. Omitted, ``voice`` resolves to the primary (or the synthetic ``primary``
+of a solo pack), preserving the legacy behavior.
+
 Endpoints
 ---------
 
-* ``GET  /status?filename=…``     — per-song readiness flags
+* ``GET  /status?filename=…[&voice=…]``     — per-song readiness flags + voice list
 * ``GET  /server-status``         — alignment server reachable?
 * ``GET  /data?filename=…``       — merged ``[{t, d, w, midi?}]`` for the player overlay
 * ``GET  /playback?filename=…[&arrangement=N]`` — canonical versioned multi-voice payload (see below)
-* ``POST /align``                 — run Whisper alignment, return segments
-* ``POST /save-lyrics``           — persist alignment segments as ``lyrics.json``
-* ``POST /generate-pitch``        — extract per-syllable pitch and persist ``vocal_pitch.json``
+* ``POST /align``                 — run Whisper alignment, return segments (echoes ``voice``)
+* ``POST /save-lyrics``           — persist alignment segments to the resolved voice's lyrics
+* ``POST /generate-pitch``        — extract per-syllable pitch into the resolved voice's pitch
 * ``POST /export``                — download alignment as a standard ``.lrc`` file
 """
 
@@ -205,14 +212,13 @@ def _coerce_midi(value: object) -> int | None:
     return int(number)
 
 
-def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
-    """Return the sloppak's syllable list as ``[{t, d, w}, ...]``.
+def _read_lyrics_tokens(source_dir: Path, rel: object) -> list[dict]:
+    """Parse the lyrics sidecar at manifest-relative ``rel``.
 
-    Lyrics live in ``lyrics.json`` (path comes from manifest.lyrics). Returns
-    an empty list if absent or unparseable — callers gate on ``len(...) > 0``
-    so karaoke generation requires synced lyrics.
+    Returns an empty list when the pointer is missing, the file is absent or
+    unparseable, or the payload isn't a list — callers gate on
+    ``len(...) > 0`` so karaoke generation requires synced lyrics.
     """
-    rel = manifest.get("lyrics")
     if not rel:
         return []
     p = _safe_source_path(source_dir, str(rel))
@@ -235,6 +241,16 @@ def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
         w = str(item.get("w", ""))
         out.append({"t": t, "d": d, "w": w})
     return out
+
+
+def _lyrics_tokens(source_dir: Path, manifest: dict) -> list[dict]:
+    """Return the primary voice's syllable list as ``[{t, d, w}, ...]``.
+
+    Reads the singular ``lyrics`` manifest key — the compatibility alias the
+    primary voice keeps in sync. Voice-targeted preparation reads a track's
+    own pointer through `VoiceTarget` instead.
+    """
+    return _read_lyrics_tokens(source_dir, manifest.get("lyrics"))
 
 
 # ── Canonical multi-voice playback payload ────────────────────────────────────
@@ -591,8 +607,7 @@ def _resolve_sloppak(filename: str):
     return source_dir, manifest, dlc_path, dlc_path.is_file()
 
 
-def _read_pitch_file(source_dir: Path, manifest: dict) -> dict | None:
-    rel = manifest.get("vocal_pitch")
+def _read_pitch_file_rel(source_dir: Path, rel: object) -> dict | None:
     if not rel:
         return None
     p = _safe_source_path(source_dir, str(rel))
@@ -603,6 +618,10 @@ def _read_pitch_file(source_dir: Path, manifest: dict) -> dict | None:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _read_pitch_file(source_dir: Path, manifest: dict) -> dict | None:
+    return _read_pitch_file_rel(source_dir, manifest.get("vocal_pitch"))
 
 
 # ── Pitch extraction ──────────────────────────────────────────────────────────
@@ -834,6 +853,299 @@ def _extract_pitch_via_server(server_url: str, vocals_path: Path, lyrics: list[d
     return out
 
 
+# ── Voice targeting (preparation) ─────────────────────────────────────────────
+#
+# The preparation routes (/status, /align, /save-lyrics, /generate-pitch) can
+# target ONE voice of a duet pack authored with the additive ``vocal_tracks``
+# extension. A target resolves to the sidecar paths that voice owns, so a save
+# writes that track's own ``lyrics``/``vocal_pitch`` pointers instead of the
+# shared hardcoded ``lyrics.json``/``vocal_pitch.json`` filenames — the bug
+# where a duet save reported success while ``/playback`` kept serving the
+# primary's stale ``lead.json``. The primary voice also keeps the singular
+# compatibility aliases in sync, because older readers rely on them; a
+# secondary voice never touches the aliases or another track's files. Solo
+# packs (no ``vocal_tracks``) keep the legacy singular pointers: the solo
+# voice IS the singular aliases, so reads and writes honor whatever file they
+# name.
+
+_DEFAULT_LYRICS_REL = "lyrics.json"
+_DEFAULT_PITCH_REL = "vocal_pitch.json"
+
+
+class VoiceTargetError(Exception):
+    """Raised when a requested voice can't be resolved. Carries the HTTP
+    status the route should return, matching `LyricsPersistenceError`."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class VoiceTarget:
+    """One preparable voice: the sidecar pointers it owns plus manifest
+    aliases. ``entry`` is the ``vocal_tracks`` mapping for a duet voice, or
+    ``None`` for a solo pack (whose singular aliases ARE the pointers)."""
+
+    __slots__ = ("id", "name", "primary", "solo", "entry", "lyrics_rel", "pitch_rel")
+
+    def __init__(self, *, voice_id, name, primary, solo, entry, lyrics_rel, pitch_rel):
+        self.id = voice_id
+        self.name = name
+        self.primary = primary
+        self.solo = solo
+        self.entry = entry
+        self.lyrics_rel = lyrics_rel
+        self.pitch_rel = pitch_rel
+
+
+def _track_usable(source_dir: Path, entry: dict) -> bool:
+    """Whether an entry is renderable right now — it has synced lyrics.
+
+    Matches `_canonical_voices`'s inclusion rule: a track with no usable
+    tokens doesn't appear in `/playback`, so it doesn't consume the blank-id
+    numbers below. An unusable track is still addressable (it is precisely the
+    part awaiting preparation), just never miscounted as someone else's id.
+    """
+    return bool(_read_lyrics_tokens(source_dir, entry.get("lyrics")))
+
+
+def _voice_entries(source_dir: Path, manifest: dict) -> list[tuple[str, dict, bool]]:
+    """Return ``[(id, entry, usable), ...]`` for the manifest's voices.
+
+    Returns ``[]`` for a solo pack (no ``vocal_tracks``). Renderable entries
+    come first, in manifest order, so a blank id gets ``v{n}`` exactly as
+    `_canonical_voices` numbers it (the renderable voices seen so far, plus
+    one) — an id `/playback` serves is never re-used for a different track
+    here. Tracks that aren't renderable yet stay addressable and continue the
+    sequence after them. Duplicate ids raise `VoiceTargetError` (even when
+    one copy isn't renderable yet — an ambiguous id is a pack error, and
+    preparing the other copy would silently flip it into `/playback`'s view).
+    Non-mapping entries can't carry pointers or be addressed, so they are
+    skipped.
+    """
+    tracks = manifest.get("vocal_tracks")
+    if not isinstance(tracks, list) or not tracks:
+        return []
+    usable: list[tuple[dict, str]] = []
+    unusable: list[tuple[dict, str]] = []
+    for entry in tracks:
+        if not isinstance(entry, dict):
+            continue
+        raw_id = _coerce_stringlike(entry.get("id"))
+        voice_id = raw_id.strip() if raw_id is not None else ""
+        if _track_usable(source_dir, entry):
+            usable.append((entry, voice_id))
+        else:
+            unusable.append((entry, voice_id))
+
+    entries: list[tuple[str, dict, bool]] = []
+    seen: set[str] = set()
+    usable_seen = 0
+    for entry, voice_id in usable:
+        if not voice_id:
+            voice_id = f"v{usable_seen + 1}"
+        if voice_id in seen:
+            raise VoiceTargetError(422, f"Duplicate vocal track id: {voice_id}")
+        seen.add(voice_id)
+        usable_seen += 1
+        entries.append((voice_id, entry, True))
+
+    next_id = usable_seen + 1
+    for entry, voice_id in unusable:
+        if not voice_id:
+            voice_id = f"v{next_id}"
+            while voice_id in seen:
+                next_id += 1
+                voice_id = f"v{next_id}"
+            next_id += 1
+        if voice_id in seen:
+            raise VoiceTargetError(422, f"Duplicate vocal track id: {voice_id}")
+        seen.add(voice_id)
+        entries.append((voice_id, entry, False))
+    return entries
+
+
+def _voice_name(entry: dict) -> str | None:
+    raw_name = _coerce_stringlike(entry.get("name"))
+    return raw_name.strip() if raw_name and raw_name.strip() else None
+
+
+def _voice_primary_id(entries: list[tuple[str, dict, bool]]) -> str:
+    """The id `/playback` renders as primary: the first flagged *renderable*
+    entry, else the first renderable entry — mirroring `_canonical_voices`,
+    which only indexes tracks with usable tokens — so a default build targets
+    the same track the player shows as the lead. For a pack with nothing
+    renderable yet, falls back to the first flagged entry, then the first
+    addressable one, so a fresh duet still has a default target.
+    """
+    for voice_id, entry, usable in entries:
+        if usable and bool(entry.get("primary")):
+            return voice_id
+    for voice_id, _entry, usable in entries:
+        if usable:
+            return voice_id
+    for voice_id, entry, _usable in entries:
+        if bool(entry.get("primary")):
+            return voice_id
+    return entries[0][0]
+
+
+def _safe_voice_rel(source_dir: Path, rel: object) -> str | None:
+    """Return a manifest pointer that stays inside ``source_dir``, else ``None``.
+
+    A crafted pack can declare an absolute or ``..`` pointer; ignoring it and
+    falling back to a generated filename keeps preparation from writing outside
+    the pack. `_safe_source_path` also rejects NUL/drive-absolute names.
+    """
+    text = _coerce_stringlike(rel)
+    if text is None:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    if _safe_source_path(source_dir, text) is None:
+        return None
+    return text
+
+
+def _voice_slug(voice_id: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(voice_id)).strip("._-")
+    return slug or "voice"
+
+
+def _unique_voice_slug(voice_id: str, entries: list[tuple[str, dict, bool]]) -> str:
+    """A filesystem-safe slug for ``voice_id`` that no other voice shares.
+
+    Distinct ids can slug to the same text (``a/b`` and ``a_b`` both map to
+    ``a_b``), so the first occurrence keeps the bare slug and later ones get a
+    ``-2``/``-3`` suffix by addressable position. Position-based, so
+    re-preparing a voice deterministically writes the same file.
+    """
+    base = _voice_slug(voice_id)
+    n = 1
+    for vid, _entry, _usable in entries:
+        if vid == voice_id:
+            break
+        if _voice_slug(vid) == base:
+            n += 1
+    return base if n == 1 else f"{base}-{n}"
+
+
+def _default_voice_sidecars(
+    source_dir: Path, manifest: dict, voice_id: str, primary: bool,
+    entries: list[tuple[str, dict, bool]],
+) -> tuple[str, str]:
+    """Filenames for a voice with no declared sidecar pointer.
+
+    The primary voice inherits the singular aliases (so a solo-era pack keeps
+    reading its existing files) or the legacy default names. A secondary voice
+    gets an id-slugged name, disambiguated against its siblings, so two voices
+    can never be given the same file.
+    """
+    if primary:
+        return (
+            _safe_voice_rel(source_dir, manifest.get("lyrics")) or _DEFAULT_LYRICS_REL,
+            _safe_voice_rel(source_dir, manifest.get("vocal_pitch")) or _DEFAULT_PITCH_REL,
+        )
+    slug = _unique_voice_slug(voice_id, entries)
+    return f"{slug}.lyrics.json", f"{slug}.vocal_pitch.json"
+
+
+def _resolve_voice_target(
+    source_dir: Path, manifest: dict, voice_id: str | None = None
+) -> VoiceTarget:
+    """Resolve ``voice_id`` to a `VoiceTarget`, or the default voice when None.
+
+    Raises `VoiceTargetError(422)` for an unknown id, and for a pack whose
+    ``vocal_tracks`` carry duplicate ids. The default is the voice `/playback`
+    renders as primary — the first flagged renderable track, else the first
+    renderable one, else (for a pack with nothing prepared yet) the first
+    flagged or first addressable track — or the solo voice of a pack without
+    ``vocal_tracks``.
+    """
+    requested = _coerce_stringlike(voice_id)
+    requested = requested.strip() if requested is not None else ""
+
+    entries = _voice_entries(source_dir, manifest)
+    if not entries:
+        if requested and requested != "primary":
+            raise VoiceTargetError(422, f"Unknown vocal track id: {voice_id}")
+        return VoiceTarget(
+            voice_id="primary", name="Vocals", primary=True, solo=True, entry=None,
+            lyrics_rel=_safe_voice_rel(source_dir, manifest.get("lyrics")) or _DEFAULT_LYRICS_REL,
+            pitch_rel=_safe_voice_rel(source_dir, manifest.get("vocal_pitch")) or _DEFAULT_PITCH_REL,
+        )
+
+    primary_id = _voice_primary_id(entries)
+    if requested:
+        for vid, entry, _usable in entries:
+            if vid == requested:
+                chosen_id, chosen = vid, entry
+                break
+        else:
+            raise VoiceTargetError(422, f"Unknown vocal track id: {voice_id}")
+    else:
+        chosen_id = primary_id
+        chosen = next(entry for vid, entry, _usable in entries if vid == chosen_id)
+
+    primary = chosen_id == primary_id
+    lyrics_rel = _safe_voice_rel(source_dir, chosen.get("lyrics"))
+    pitch_rel = _safe_voice_rel(source_dir, chosen.get("vocal_pitch"))
+    if lyrics_rel is None or pitch_rel is None:
+        default_lyrics, default_pitch = _default_voice_sidecars(
+            source_dir, manifest, chosen_id, primary, entries
+        )
+        if lyrics_rel is None:
+            lyrics_rel = default_lyrics
+        if pitch_rel is None:
+            pitch_rel = default_pitch
+    return VoiceTarget(
+        voice_id=chosen_id, name=_voice_name(chosen), primary=primary, solo=False,
+        entry=chosen, lyrics_rel=lyrics_rel, pitch_rel=pitch_rel,
+    )
+
+
+def _apply_voice_pointer(manifest: dict, target: VoiceTarget, key: str, rel: str) -> bool:
+    """Point the manifest at ``rel`` for ``key`` (``lyrics``/``vocal_pitch``).
+
+    A solo target, or the primary voice of a duet, also updates the singular
+    compatibility alias; a secondary voice writes only its own track pointer,
+    so it can never clobber the primary's alias. Returns True if anything
+    changed, so the caller only rewrites the manifest when it must.
+    """
+    changed = False
+    if target.solo or target.entry is None:
+        if manifest.get(key) != rel:
+            manifest[key] = rel
+            changed = True
+        return changed
+    if target.entry.get(key) != rel:
+        target.entry[key] = rel
+        changed = True
+    if target.primary and manifest.get(key) != rel:
+        manifest[key] = rel
+        changed = True
+    return changed
+
+
+def _voice_summaries(source_dir: Path, manifest: dict) -> list[dict]:
+    """``[{id, name, primary}]`` for the setup screen's voice selector.
+
+    Includes every addressable voice, prepared or not, so the UI can offer a
+    part whose sidecars don't exist yet. Raises `VoiceTargetError` on duplicate
+    ids, like `/playback` does.
+    """
+    entries = _voice_entries(source_dir, manifest)
+    if not entries:
+        return [{"id": "primary", "name": "Vocals", "primary": True}]
+    primary_id = _voice_primary_id(entries)
+    return [
+        {"id": voice_id, "name": _voice_name(entry), "primary": voice_id == primary_id}
+        for voice_id, entry, _usable in entries
+    ]
+
+
 # ── Persistence: write JSON + patch manifest + re-zip ─────────────────────────
 
 def _rezip_sloppak(source_dir: Path, output_path: Path) -> None:
@@ -884,10 +1196,16 @@ def _persist_lyrics(
     segments: list[dict],
     dlc_path: Path,
     is_zip: bool,
+    target: VoiceTarget | None = None,
 ) -> tuple[int, int]:
     """Convert alignment segments to the sloppak lyrics format and persist.
 
     Returns ``(written, dropped)``.
+
+    ``target`` selects the voice whose sidecar and manifest pointers are
+    written (see `_resolve_voice_target`); ``None`` resolves the default
+    voice — the primary of a duet pack, or the solo voice — preserving the
+    legacy single-voice behavior.
 
     Unusable segments are dropped rather than failing the whole request,
     mirroring the tolerant per-token reads in `_lyrics_tokens` — one bad row
@@ -930,10 +1248,15 @@ def _persist_lyrics(
             "invalid (need finite start < end); existing lyrics left untouched",
         )
 
-    _atomic_write_json(source_dir / "lyrics.json", lyrics_data)
+    if target is None:
+        target = _resolve_voice_target(source_dir, manifest)
+    lyrics_path = _safe_source_path(source_dir, target.lyrics_rel)
+    if lyrics_path is None:
+        raise VoiceTargetError(422, f"Unsafe lyrics path: {target.lyrics_rel}")
 
-    if manifest.get("lyrics") != "lyrics.json":
-        manifest["lyrics"] = "lyrics.json"
+    _atomic_write_json(lyrics_path, lyrics_data)
+
+    if _apply_voice_pointer(manifest, target, "lyrics", target.lyrics_rel):
         _write_manifest(source_dir, manifest)
 
     if is_zip:
@@ -947,12 +1270,18 @@ def _persist_pitch(
     notes: list[dict],
     dlc_path: Path,
     is_zip: bool,
+    target: VoiceTarget | None = None,
 ) -> None:
-    pitch_payload = {"version": 1, "notes": notes}
-    _atomic_write_json(source_dir / "vocal_pitch.json", pitch_payload)
+    if target is None:
+        target = _resolve_voice_target(source_dir, manifest)
+    pitch_path = _safe_source_path(source_dir, target.pitch_rel)
+    if pitch_path is None:
+        raise VoiceTargetError(422, f"Unsafe pitch path: {target.pitch_rel}")
 
-    if manifest.get("vocal_pitch") != "vocal_pitch.json":
-        manifest["vocal_pitch"] = "vocal_pitch.json"
+    pitch_payload = {"version": 1, "notes": notes}
+    _atomic_write_json(pitch_path, pitch_payload)
+
+    if _apply_voice_pointer(manifest, target, "vocal_pitch", target.pitch_rel):
         _write_manifest(source_dir, manifest)
 
     if is_zip:
@@ -1022,12 +1351,19 @@ def setup(app: FastAPI, context: dict):
     # ── Per-song readiness ────────────────────────────────────────────────
 
     @app.get("/api/plugins/lyrics_karaoke/status")
-    def lk_status(filename: str = ""):
+    def lk_status(filename: str = "", voice: str = ""):
         """Per-song readiness check.
 
         Returns the flag set the setup screen and the in-player toggle
         both consume. archive songs have ``is_sloppak=False`` and the rest
         of the flags are meaningless.
+
+        ``voice`` selects which part the flags describe (a duet pack's
+        ``vocal_tracks`` id); omitted, it defaults to the primary voice.
+        ``voices`` always lists every addressable part so the setup screen
+        can offer them, and the per-voice flags are what the build pipeline
+        gates on — so the selector, the checklist, and the write routes all
+        agree on the selected voice. An unknown or duplicated id is a 422.
         """
         result = {
             "filename": filename,
@@ -1042,13 +1378,19 @@ def setup(app: FastAPI, context: dict):
             return result
         source_dir, manifest, _dlc_path, _is_zip = resolved
         result["is_sloppak"] = True
+        try:
+            target = _resolve_voice_target(source_dir, manifest, voice or None)
+            result["voice"] = target.id
+            result["voices"] = _voice_summaries(source_dir, manifest)
+        except VoiceTargetError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
         vocals_rel = _vocals_rel_path(manifest)
         vocals_path = _safe_source_path(source_dir, vocals_rel) if vocals_rel else None
         if vocals_path and vocals_path.exists():
             result["has_vocals"] = True
-        if _lyrics_tokens(source_dir, manifest):
+        if _read_lyrics_tokens(source_dir, target.lyrics_rel):
             result["has_lyrics"] = True
-        pitch = _read_pitch_file(source_dir, manifest)
+        pitch = _read_pitch_file_rel(source_dir, target.pitch_rel)
         if pitch and isinstance(pitch.get("notes"), list):
             result["has_pitch"] = True
             result["pitch_count"] = len(pitch["notes"])
@@ -1155,11 +1497,18 @@ def setup(app: FastAPI, context: dict):
         Returns ``{segments: [{start, end, text, ...}]}`` on success.
         The caller previews this and then POSTs to ``/save-lyrics`` to
         commit the result to the sloppak.
+
+        ``voice`` names the duet part this alignment is for; it is validated
+        (and echoed back) so a stale or unknown selector fails here rather
+        than silently saving the result to the wrong track. Alignment itself
+        always runs on the song's vocals stem — the ``vocal_tracks`` extension
+        carries per-voice lyric/pitch pointers, not a per-voice stem.
         """
         filename = (data or {}).get("filename", "")
         lyrics_text = ((data or {}).get("lyrics_text") or "").strip()
         language = (data or {}).get("language", "")
         granularity = (data or {}).get("granularity", "syllable")
+        voice = (data or {}).get("voice", "")
 
         if not filename:
             return JSONResponse({"error": "filename required"}, 400)
@@ -1170,6 +1519,10 @@ def setup(app: FastAPI, context: dict):
         if resolved is None:
             return JSONResponse({"error": "Not a sloppak"}, 400)
         source_dir, manifest, _dlc_path, _is_zip = resolved
+        try:
+            target = _resolve_voice_target(source_dir, manifest, voice or None)
+        except VoiceTargetError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
 
         vocals_rel = _vocals_rel_path(manifest)
         if not vocals_rel:
@@ -1218,11 +1571,15 @@ def setup(app: FastAPI, context: dict):
                 {"error": f"Alignment failed: {result['error']}"},
                 502,
             )
+        if isinstance(result, dict):
+            # Echo the validated voice so the caller passes the same target to
+            # /save-lyrics, even when it was resolved from the default.
+            result.setdefault("voice", target.id)
         return result
 
     @app.post("/api/plugins/lyrics_karaoke/save-lyrics")
     def lk_save_lyrics(data: dict):
-        """Persist alignment segments as the sloppak's ``lyrics.json``.
+        """Persist alignment segments as the selected voice's lyrics sidecar.
 
         Partial-invalid input is accepted: segments the sanitizer can use are
         written and the count of dropped entries comes back as
@@ -1230,9 +1587,15 @@ def setup(app: FastAPI, context: dict):
         usable segment is rejected with 422 before any write, so a malformed
         alignment can never erase existing lyrics — the response body says
         so and the pack is left byte-for-byte unchanged.
+
+        ``voice`` selects the duet part to write (``vocal_tracks`` id); the
+        primary voice also updates the singular ``lyrics`` alias, a secondary
+        voice writes only its own pointer. Omitted, it defaults to the
+        primary/solo voice, which is exactly the legacy behavior.
         """
         filename = (data or {}).get("filename", "")
         segments = (data or {}).get("segments", []) or []
+        voice = (data or {}).get("voice", "")
         if not filename:
             return JSONResponse({"error": "filename required"}, 400)
         if not isinstance(segments, list) or not segments:
@@ -1242,14 +1605,22 @@ def setup(app: FastAPI, context: dict):
         if resolved is None:
             return JSONResponse({"error": "Not a sloppak"}, 400)
         source_dir, manifest, dlc_path, is_zip = resolved
+        try:
+            target = _resolve_voice_target(source_dir, manifest, voice or None)
+        except VoiceTargetError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
 
         try:
-            count, dropped = _persist_lyrics(source_dir, manifest, segments, dlc_path, is_zip)
+            count, dropped = _persist_lyrics(
+                source_dir, manifest, segments, dlc_path, is_zip, target=target
+            )
         except LyricsPersistenceError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
+        except VoiceTargetError as exc:
             return JSONResponse({"error": exc.message}, exc.status)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": f"Persist failed: {exc}"}, 500)
-        payload = {"ok": True, "lyrics_count": count}
+        payload = {"ok": True, "lyrics_count": count, "voice": target.id}
         if dropped:
             _log.warning(
                 "save-lyrics: dropped %d unusable segment(s) of %d for %r",
@@ -1262,12 +1633,18 @@ def setup(app: FastAPI, context: dict):
 
     @app.post("/api/plugins/lyrics_karaoke/generate-pitch")
     async def lk_generate_pitch(data: dict):
-        """Run pYIN on the vocals stem and persist ``vocal_pitch.json``.
+        """Run pYIN on the vocals stem and persist the selected voice's pitch.
 
         Heavy work runs in the default executor; per-filename locking
         serializes accidental double-clicks.
+
+        ``voice`` selects the duet part: its own synced lyrics drive the
+        per-syllable boundaries and its own ``vocal_pitch`` pointer is
+        written, while the primary voice also updates the singular alias.
+        Omitted, it defaults to the primary/solo voice.
         """
         filename = (data or {}).get("filename", "")
+        voice = (data or {}).get("voice", "")
         resolved = _resolve_sloppak(filename)
         if resolved is None:
             return JSONResponse(
@@ -1275,6 +1652,10 @@ def setup(app: FastAPI, context: dict):
                 400,
             )
         source_dir, manifest, dlc_path, is_zip = resolved
+        try:
+            target = _resolve_voice_target(source_dir, manifest, voice or None)
+        except VoiceTargetError as exc:
+            return JSONResponse({"error": exc.message}, exc.status)
 
         vocals_rel = _vocals_rel_path(manifest)
         if not vocals_rel:
@@ -1289,7 +1670,7 @@ def setup(app: FastAPI, context: dict):
                 400,
             )
 
-        lyrics = _lyrics_tokens(source_dir, manifest)
+        lyrics = _read_lyrics_tokens(source_dir, target.lyrics_rel)
         if not lyrics:
             return JSONResponse(
                 {"error": "No synced lyrics — align lyrics first."},
@@ -1338,7 +1719,9 @@ def setup(app: FastAPI, context: dict):
                             ),
                         }
                     try:
-                        _persist_pitch(source_dir, manifest, notes, dlc_path, is_zip)
+                        _persist_pitch(source_dir, manifest, notes, dlc_path, is_zip, target=target)
+                    except VoiceTargetError as exc:
+                        return False, {"error": exc.message, "_status": exc.status}
                     except Exception as exc:  # noqa: BLE001
                         return False, {"error": f"Persist failed: {exc}"}
                     return True, {
@@ -1346,6 +1729,7 @@ def setup(app: FastAPI, context: dict):
                         "notes_count": len(notes),
                         "syllables_total": len(lyrics),
                         "extractor": "server-crepe" if used_server else "local-pyin",
+                        "voice": target.id,
                     }
 
             # get_running_loop(), not get_event_loop(): this coroutine only
@@ -1357,7 +1741,8 @@ def setup(app: FastAPI, context: dict):
             # call for "the loop I'm already running in".
             ok, payload = await asyncio.get_running_loop().run_in_executor(None, _worker)
             if not ok:
-                return JSONResponse(payload, 500)
+                status = payload.pop("_status", 500)
+                return JSONResponse(payload, status)
             return payload
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

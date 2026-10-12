@@ -2424,6 +2424,11 @@
         selectedFilename: null,
         selectedTitle: '',
         selectedArtist: '',
+        // Selected duet part (a `vocal_tracks` id). Empty means "use the
+        // default" — the server resolves that to the primary voice, which is
+        // the only choice a solo pack has. Reset on song change so a part id
+        // from one pack never leaks into another.
+        selectedVoice: '',
         // Last alignment result (returned by /align). Held in memory
         // until the build pipeline auto-saves or the user discards.
         alignmentResult: null,
@@ -2538,6 +2543,7 @@
         setup.selectedFilename = filename;
         setup.selectedTitle = title;
         setup.selectedArtist = artist;
+        setup.selectedVoice = '';
         setup.alignmentResult = null;
         const results = setupEl('lk-search-results');
         if (results) results.innerHTML = '';
@@ -2554,6 +2560,7 @@
         setup.selectedFilename = null;
         setup.selectedTitle = '';
         setup.selectedArtist = '';
+        setup.selectedVoice = '';
         setup.alignmentResult = null;
         setup.status = null;
         const sel = setupEl('lk-selected-song');
@@ -2561,7 +2568,7 @@
         if (sel) sel.classList.add('hidden');
         if (lbl) lbl.textContent = '';
         // Hide all the per-song sections.
-        for (const id of ['lk-checklist-section', 'lk-lyrics-section', 'lk-build-section', 'lk-done', 'lk-progress', 'lk-error']) {
+        for (const id of ['lk-checklist-section', 'lk-voice-section', 'lk-lyrics-section', 'lk-build-section', 'lk-done', 'lk-progress', 'lk-error']) {
             const el = setupEl(id);
             if (el) el.classList.add('hidden');
         }
@@ -2569,7 +2576,10 @@
 
     async function refreshSetupStatus() {
         if (!setup.selectedFilename) return;
-        const url = `/api/plugins/lyrics_karaoke/status?filename=${encodeURIComponent(setup.selectedFilename)}`;
+        let url = `/api/plugins/lyrics_karaoke/status?filename=${encodeURIComponent(setup.selectedFilename)}`;
+        if (setup.selectedVoice) {
+            url += `&voice=${encodeURIComponent(setup.selectedVoice)}`;
+        }
         const res = await safeFetch(url);
         if (!res.ok) return;
         // Pinned to selectedFilename — refreshSetupStatus is called from
@@ -2580,9 +2590,48 @@
         renderSetupStatus();
     }
 
+    function lkSelectVoice(el) {
+        setup.selectedVoice = el ? (el.value || '') : '';
+        refreshSetupStatus();
+    }
+
+    function renderVoiceSelect(s) {
+        // Only duet packs (more than one addressable voice) get a picker. For
+        // a solo pack the section stays hidden and `selectedVoice` stays
+        // empty, so every write route takes its legacy default path.
+        const section = setupEl('lk-voice-section');
+        const sel = setupEl('lk-voice');
+        if (!section || !sel) return;
+        const voices = (s && Array.isArray(s.voices)) ? s.voices : [];
+        if (voices.length <= 1) {
+            section.classList.add('hidden');
+            return;
+        }
+        section.classList.remove('hidden');
+        const ids = voices.map((v) => v.id);
+        // Prefer the user's pick while it still exists; otherwise follow the
+        // server-resolved default (the primary voice).
+        let chosen = setup.selectedVoice && ids.indexOf(setup.selectedVoice) >= 0
+            ? setup.selectedVoice
+            : (s.voice || ids[0]);
+        if (ids.indexOf(chosen) < 0) chosen = ids[0];
+        setup.selectedVoice = chosen;
+        sel.innerHTML = voices.map((v) => {
+            const value = escHtml(v.id);
+            const label = escHtml(v.name || v.id);
+            const suffix = v.primary ? ' (primary)' : '';
+            const selected = v.id === chosen ? ' selected' : '';
+            return `<option value="${value}"${selected}>${label}${suffix}</option>`;
+        }).join('');
+    }
+
     function renderSetupStatus() {
         const s = setup.status;
         if (!s) return;
+        // Populate the duet voice picker first — it can update
+        // `setup.selectedVoice`, though the flags below already describe the
+        // voice the server resolved for this response.
+        renderVoiceSelect(s);
         const checklist = setupEl('lk-checklist');
         const checklistSection = setupEl('lk-checklist-section');
         if (checklistSection) checklistSection.classList.remove('hidden');
@@ -2753,6 +2802,10 @@
     async function lkBuild() {
         if (!setup.selectedFilename || !setup.status) return;
         const filename = setup.selectedFilename;
+        // Pin the target voice for the whole build. The part could change
+        // between the alignment and the pitch step only if the user drops the
+        // selector; capturing it keeps both writes on the same track.
+        const voice = setup.selectedVoice || undefined;
         const btn = setupEl('lk-build-btn');
         if (btn) btn.disabled = true;
 
@@ -2773,6 +2826,7 @@
                         lyrics_text: text,
                         language: lang || undefined,
                         granularity,
+                        voice,
                     }),
                 });
                 if (filename !== setup.selectedFilename) return;
@@ -2786,7 +2840,7 @@
                 const saveRes = await safeFetch('/api/plugins/lyrics_karaoke/save-lyrics', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename, segments: setup.alignmentResult }),
+                    body: JSON.stringify({ filename, segments: setup.alignmentResult, voice }),
                 });
                 if (filename !== setup.selectedFilename) return;
                 if (!saveRes.ok) {
@@ -2801,7 +2855,7 @@
             const pitchRes = await safeFetch('/api/plugins/lyrics_karaoke/generate-pitch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename }),
+                body: JSON.stringify({ filename, voice }),
             });
             if (filename !== setup.selectedFilename) return;
             if (!pitchRes.ok) {
@@ -2830,11 +2884,12 @@
     async function lkRedoPitch() {
         if (!setup.selectedFilename) return;
         const filename = setup.selectedFilename;
+        const voice = setup.selectedVoice || undefined;
         showProgress('Re-extracting per-syllable pitch…');
         const res = await safeFetch('/api/plugins/lyrics_karaoke/generate-pitch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename }),
+            body: JSON.stringify({ filename, voice }),
         });
         if (filename !== setup.selectedFilename) return;
         if (!res.ok) {
@@ -2925,6 +2980,7 @@
     window.lkSearchSongs = lkSearchSongs;
     window.lkSelectFromResult = lkSelectFromResult;
     window.lkClearSong = lkClearSong;
+    window.lkSelectVoice = lkSelectVoice;
     window.lkBuild = lkBuild;
     window.lkRedoPitch = lkRedoPitch;
     window.lkExport = lkExport;

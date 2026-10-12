@@ -262,6 +262,8 @@ def test_status_route_reports_prepared_data_on_the_minimum_host(tmp_path, monkey
     assert status == {
         "filename": "song.sloppak", "is_sloppak": True, "has_vocals": True,
         "has_lyrics": True, "has_pitch": True, "pitch_count": 2,
+        "voice": "primary",
+        "voices": [{"id": "primary", "name": "Vocals", "primary": True}],
     }
 
 

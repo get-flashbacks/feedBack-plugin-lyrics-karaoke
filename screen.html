@@ -46,6 +46,15 @@
         </ul>
     </div>
 
+    <!-- Voice selector (duet packs with more than one vocal part) -->
+    <div id="lk-voice-section" class="mb-6 hidden">
+        <label class="text-sm font-semibold text-gray-300 mb-2 block" for="lk-voice">Vocal part</label>
+        <select id="lk-voice" onchange="lkSelectVoice(this)"
+            class="bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 focus:border-accent/50 outline-none">
+        </select>
+        <p class="text-xs text-gray-500 mt-1">Lyrics and pitch are prepared for this part. The primary part also updates the song's compatibility files.</p>
+    </div>
+
     <!-- Step 3: lyrics input (shown when synced lyrics are missing) -->
     <div id="lk-lyrics-section" class="mb-6 hidden">
         <label class="text-sm font-semibold text-gray-300 mb-2 block">3. Plain lyric text</label>
