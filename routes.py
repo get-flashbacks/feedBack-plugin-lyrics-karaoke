@@ -534,13 +534,22 @@ def _build_playback_payload(
 def _job_lock_for(filename: str | Path) -> threading.Lock:
     """Per-canonical-pack lock, shared by every preparation write.
 
-    Keyed on the *real* on-disk path so two filename aliases that resolve to
-    one sloppak (a hardlink, a symlink, two library entries pointing at one
-    archive) serialize against each other. Keying on the raw request filename
+    Keyed on the *real* on-disk path so two symlink aliases that resolve to one
+    sloppak serialize against each other. Keying on the raw request filename
     would let each alias capture its own manifest snapshot and then clobber
     the other's pointer on commit (issue #60). Callers pass the resolved
     ``dlc_path``; a plain filename string still works (resolved against the
     cwd), so direct unit callers keep working.
+
+    Directory-form aliases are fully covered — the host resolves them to the
+    same files through the symlink, so the reload-and-merge inside the lock
+    always sees one manifest. Zip-form aliases are not: the host keys its
+    unpack cache on the raw request filename (``sloppak.py``'s
+    ``_safe_id(filename)``), so two aliases share this lock yet reload from
+    two different cache dirs, and the second commit can still re-zip its stale
+    cache over the first's pointer. That narrow case — two *different* library
+    entries pointing at one archive, prepared at once — is out of scope for
+    issue #60, whose reproduction is a single filename.
     """
     key = os.path.realpath(str(filename))
     with _job_locks_guard:
@@ -1755,7 +1764,9 @@ def setup(app: FastAPI, context: dict):
         other preparation write on the song for the duration. `_persist_pitch`
         re-acquires the lock and re-checks that the lyrics are unchanged before
         committing, rejecting a stale result instead of attaching pitches to
-        changed lyrics (issue #60).
+        changed lyrics (issue #60). Extraction and the commit both run in the
+        default executor, since a zip pack re-zips synchronously on commit and
+        must not block the event loop.
 
         ``voice`` selects the duet part: its own synced lyrics drive the
         per-syllable boundaries and its own ``vocal_pitch`` pointer is
@@ -1773,82 +1784,85 @@ def setup(app: FastAPI, context: dict):
         source_dir, manifest, dlc_path, is_zip = resolved
 
         # Capture the target + lyrics snapshot under the pack lock so the
-        # manifest pointer and the sidecar it names are read as one state.
+        # manifest pointer and the sidecar it names are read as one state. The
+        # whole body sits inside `try` so the `finally` that removes `tmp_dir`
+        # also covers its own creation and the stem copy — a copy failure must
+        # not leak the temp directory.
         lock = _job_lock_for(dlc_path)
         tmp_dir = None
-        with lock:
-            manifest = _read_manifest(source_dir)
-            try:
-                target = _resolve_voice_target(source_dir, manifest, voice or None)
-            except VoiceTargetError as exc:
-                return JSONResponse({"error": exc.message}, exc.status)
-
-            vocals_rel = _vocals_rel_path(manifest)
-            if not vocals_rel:
-                return JSONResponse(
-                    {"error": "No vocals stem — split stems with Demucs first."},
-                    400,
-                )
-            vocals_path = _safe_source_path(source_dir, vocals_rel)
-            if vocals_path is None or not vocals_path.exists():
-                return JSONResponse(
-                    {"error": f"Vocals stem missing on disk: {vocals_rel}"},
-                    400,
-                )
-
-            lyrics = _read_lyrics_tokens(source_dir, target.lyrics_rel)
-            lyrics_hash = _lyrics_content_hash(source_dir, target.lyrics_rel)
-            if not lyrics or lyrics_hash is None:
-                return JSONResponse(
-                    {"error": "No synced lyrics — align lyrics first."},
-                    400,
-                )
-
-            # Read the vocals stem from a temp copy so concurrent writes to
-            # the unpack cache (re-zip etc.) don't churn the working file.
-            tmp_dir = Path(tempfile.mkdtemp(prefix="lk-pitch-"))
-            tmp_vocals = tmp_dir / vocals_path.name
-            shutil.copy2(vocals_path, tmp_vocals)
-
-        server_url = _get_demucs_server_url()
-
-        def _worker() -> tuple[bool, dict]:
-            # Extraction only — no lock and no writes. A save-lyrics may land
-            # here; `_persist_pitch` detects that and refuses the stale result.
-            notes: list[dict] | None = None
-            used_server = False
-            # Try the demucs server's /pitch endpoint first when configured —
-            # CREPE on the GPU is dramatically more accurate than pYIN here.
-            # Fall through to the local extractor on any transport /
-            # availability failure so users without the server (or on an older
-            # build without /pitch) keep working.
-            if server_url:
-                try:
-                    notes = _extract_pitch_via_server(server_url, tmp_vocals, lyrics)
-                    used_server = True
-                except NotImplementedError:
-                    _log.info("/pitch not available on demucs server, using local pYIN")
-                except Exception as exc:  # noqa: BLE001
-                    _log.warning("demucs /pitch failed (%s); falling back to local pYIN", exc)
-            if notes is None:
-                try:
-                    notes = _extract_pitch_per_syllable(tmp_vocals, lyrics)
-                except Exception as exc:  # noqa: BLE001
-                    return False, {"error": f"Pitch extraction failed: {exc}"}
-            if not notes:
-                return False, {
-                    "error": (
-                        "Pitch extraction produced no voiced syllables — "
-                        "the vocals stem may be silent or noise-only."
-                    ),
-                }
-            return True, {
-                "notes": notes,
-                "used_server": used_server,
-                "syllables_total": len(lyrics),
-            }
-
         try:
+            with lock:
+                manifest = _read_manifest(source_dir)
+                try:
+                    target = _resolve_voice_target(source_dir, manifest, voice or None)
+                except VoiceTargetError as exc:
+                    return JSONResponse({"error": exc.message}, exc.status)
+
+                vocals_rel = _vocals_rel_path(manifest)
+                if not vocals_rel:
+                    return JSONResponse(
+                        {"error": "No vocals stem — split stems with Demucs first."},
+                        400,
+                    )
+                vocals_path = _safe_source_path(source_dir, vocals_rel)
+                if vocals_path is None or not vocals_path.exists():
+                    return JSONResponse(
+                        {"error": f"Vocals stem missing on disk: {vocals_rel}"},
+                        400,
+                    )
+
+                lyrics = _read_lyrics_tokens(source_dir, target.lyrics_rel)
+                lyrics_hash = _lyrics_content_hash(source_dir, target.lyrics_rel)
+                if not lyrics or lyrics_hash is None:
+                    return JSONResponse(
+                        {"error": "No synced lyrics — align lyrics first."},
+                        400,
+                    )
+
+                # Read the vocals stem from a temp copy so concurrent writes to
+                # the unpack cache (re-zip etc.) don't churn the working file.
+                tmp_dir = Path(tempfile.mkdtemp(prefix="lk-pitch-"))
+                tmp_vocals = tmp_dir / vocals_path.name
+                shutil.copy2(vocals_path, tmp_vocals)
+
+            server_url = _get_demucs_server_url()
+
+            def _worker() -> tuple[bool, dict]:
+                # Extraction only — no lock and no writes. A save-lyrics may land
+                # here; `_persist_pitch` detects that and refuses the stale result.
+                notes: list[dict] | None = None
+                used_server = False
+                # Try the demucs server's /pitch endpoint first when configured —
+                # CREPE on the GPU is dramatically more accurate than pYIN here.
+                # Fall through to the local extractor on any transport /
+                # availability failure so users without the server (or on an older
+                # build without /pitch) keep working.
+                if server_url:
+                    try:
+                        notes = _extract_pitch_via_server(server_url, tmp_vocals, lyrics)
+                        used_server = True
+                    except NotImplementedError:
+                        _log.info("/pitch not available on demucs server, using local pYIN")
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning("demucs /pitch failed (%s); falling back to local pYIN", exc)
+                if notes is None:
+                    try:
+                        notes = _extract_pitch_per_syllable(tmp_vocals, lyrics)
+                    except Exception as exc:  # noqa: BLE001
+                        return False, {"error": f"Pitch extraction failed: {exc}"}
+                if not notes:
+                    return False, {
+                        "error": (
+                            "Pitch extraction produced no voiced syllables — "
+                            "the vocals stem may be silent or noise-only."
+                        ),
+                    }
+                return True, {
+                    "notes": notes,
+                    "used_server": used_server,
+                    "syllables_total": len(lyrics),
+                }
+
             # get_running_loop(), not get_event_loop(): this coroutine only
             # ever runs inside a live event loop (it's an async route
             # handler), so there's no "create one if none exists" case to
@@ -1862,10 +1876,17 @@ def setup(app: FastAPI, context: dict):
                 return JSONResponse(extracted, status)
 
             notes = extracted["notes"]
+            # Commit in the executor too: for a zip pack `_persist_pitch`
+            # re-zips the whole archive synchronously, which would otherwise
+            # block the event loop — and every other in-flight request — for
+            # the duration.
             try:
-                _persist_pitch(
-                    source_dir, manifest, notes, dlc_path, is_zip,
-                    target=target, expected_lyrics_hash=lyrics_hash,
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: _persist_pitch(
+                        source_dir, manifest, notes, dlc_path, is_zip,
+                        target=target, expected_lyrics_hash=lyrics_hash,
+                    ),
                 )
             except StalePitchError as exc:
                 return JSONResponse({"error": exc.message}, exc.status)

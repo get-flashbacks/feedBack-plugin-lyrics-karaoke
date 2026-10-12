@@ -20,16 +20,17 @@ and the repository's tagged history.
   patched a stale manifest and one pointer was dropped: the on-disk manifest
   ended up with `vocal_pitch` but no `lyrics`. Concurrent writes also shared
   fixed `.tmp` filenames. Both routes now take one lock keyed on the *canonical*
-  resolved pack path (filename aliases of one sloppak share it), **reload and
-  merge the current manifest inside that lock**, and replace the sidecar,
-  manifest, and archive as one serialized commit (the manifest write is now
-  atomic too). Pitch extraction runs outside the lock — it takes minutes — but
-  commits by re-checking the lyrics it was driven by; if a save changed them in
-  the meantime the pitches are rejected with a 409 instead of being attached to
-  the wrong syllables. `tests/test_concurrent_preparation.py` drives overlapping
-  requests through barriers to cover save vs pitch, the stale-pitch rejection,
-  duplicate saves/generations, zip archive integrity, preserved unrelated
-  metadata, temp-file collisions, and the canonical-identity lock.
+  resolved pack path (symlink aliases of one directory-form sloppak share it),
+  **reload and merge the current manifest inside that lock**, and replace the
+  sidecar, manifest, and archive as one serialized commit (the manifest write
+  is now atomic too). Pitch extraction runs outside the lock — it takes
+  minutes — but commits by re-checking the lyrics it was driven by; if a save
+  changed them in the meantime the pitches are rejected with a 409 instead of
+  being attached to the wrong syllables. `tests/test_concurrent_preparation.py`
+  drives overlapping requests through barriers to cover save vs pitch, the
+  stale-pitch rejection, duplicate saves/generations, zip archive integrity,
+  preserved unrelated metadata, temp-file collisions, and the canonical-identity
+  lock.
 - Preparing a duet no longer writes the wrong voice or reports success while
   playback serves stale files
   ([#61](https://github.com/get-flashbacks/feedBack-plugin-lyrics-karaoke/issues/61)).
